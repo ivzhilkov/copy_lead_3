@@ -1,0 +1,21 @@
+version: '3.5'
+services:
+  redis:
+    image: redis
+    restart: always
+    ports:
+      - '${REDIS_PORT}:6379'
+  db:
+    image: mysql:5
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: example
+    ports:
+      - '${MYSQL_PORT}:3306'
+    volumes:
+      - ./database/mysql:/var/lib/mysql
+  adminer:
+    image: adminer
+    restart: always
+    ports:
+      - 4000:8080
