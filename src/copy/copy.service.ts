@@ -353,12 +353,17 @@ export class CopyService {
         lastError = error;
         const axiosError = error as AxiosError;
         const status = axiosError?.response?.status;
+        const code = (axiosError as any)?.code;
         const shouldRetry =
           status === 429 ||
           status === 500 ||
           status === 502 ||
           status === 503 ||
-          status === 504;
+          status === 504 ||
+          code === 'ECONNABORTED' ||
+          code === 'ETIMEDOUT' ||
+          code === 'ECONNRESET' ||
+          code === 'EAI_AGAIN';
 
         if (!shouldRetry || attempt === maxAttempts) {
           throw error;

@@ -4,6 +4,7 @@ import {
   Controller,
   ForbiddenException,
   Get,
+  Header,
   Post,
   Query,
   Req,
@@ -42,6 +43,9 @@ export class CopyController {
 
   @UseGuards(AuthGuard)
   @Get('/check')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
   check(@Query('requestId') requestId: string, @Req() req: Request) {
     return this.copyService.check(requestId, req.params.account?.amoId);
   }
@@ -72,6 +76,9 @@ export class CopyController {
   }
 
   @Get('/public/check')
+  @Header('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  @Header('Pragma', 'no-cache')
+  @Header('Expires', '0')
   checkPublic(
     @Query('requestId') requestId: string,
     @Query('account_id') accountIdRaw: string,

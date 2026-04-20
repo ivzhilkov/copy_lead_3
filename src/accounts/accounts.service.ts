@@ -28,7 +28,7 @@ export class AccountsService {
   }
   createConnector(amoId: number): AxiosInstance {
     // console.log(amoId);
-    const api = axios.create();
+    const api = axios.create({ timeout: 30000 });
     let account: Account;
     api.interceptors.request.use(
       async (config) => {

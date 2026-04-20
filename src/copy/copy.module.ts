@@ -16,6 +16,7 @@ import { CopyProcessor } from './copy.processor';
       },
       defaultJobOptions: {
         attempts: 8,
+        timeout: 120000,
         backoff: {
           type: 'exponential',
           delay: 2000,
