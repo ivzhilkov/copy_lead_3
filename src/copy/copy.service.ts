@@ -243,10 +243,6 @@ export class CopyService {
       api.post('/api/v4/leads', [body]),
     ).then(({ data }) => data?._embedded?.leads?.[0]?.id);
 
-    if (newLeadId) {
-      await this.createCrossLinkNotes(api, account.url, leadId, Number(newLeadId));
-    }
-
     if (payload.notes && newLeadId) {
       try {
         const noteBodies = (
@@ -272,6 +268,10 @@ export class CopyService {
           }`,
         );
       }
+    }
+
+    if (newLeadId) {
+      await this.createCrossLinkNotes(api, account.url, leadId, Number(newLeadId));
     }
 
     return {
@@ -370,11 +370,20 @@ export class CopyService {
       contactIds
         .filter((id) => Number.isFinite(id) && id > 0)
         .map(async (contactId) => {
-          const notes = await this.getAllEntityNotes(api, 'contacts', contactId);
-          return notes.map((note) => ({
-            ...note,
-            __source_entity: `contact:${contactId}`,
-          }));
+          try {
+            const notes = await this.getAllEntityNotes(api, 'contacts', contactId);
+            return notes.map((note) => ({
+              ...note,
+              __source_entity: `contact:${contactId}`,
+            }));
+          } catch (e) {
+            this.logger.warn(
+              `Не удалось получить примечания контакта ${contactId} для копии сделки ${leadId}: ${
+                (e as Error).message
+              }`,
+            );
+            return [];
+          }
         }),
     ).then((chunks) => chunks.flat());
 
@@ -432,12 +441,12 @@ export class CopyService {
     const sourceLeadUrl = this.getLeadUrl(accountUrl, sourceLeadId);
     const newLeadUrl = this.getLeadUrl(accountUrl, newLeadId);
 
-    await this.safeCreateCommonNote(
+    await this.safeCreateSystemNote(
       api,
       sourceLeadId,
       `Создана копия сделки: ${newLeadUrl}`,
     );
-    await this.safeCreateCommonNote(
+    await this.safeCreateSystemNote(
       api,
       newLeadId,
       `Сделка скопирована из: ${sourceLeadUrl}`,
@@ -449,7 +458,7 @@ export class CopyService {
     return `${base}/leads/detail/${leadId}`;
   }
 
-  private async safeCreateCommonNote(
+  private async safeCreateSystemNote(
     api: AxiosInstance,
     leadId: number,
     text: string,
@@ -458,8 +467,9 @@ export class CopyService {
       await this.requestWithRetry(() =>
         api.post(`/api/v4/leads/${leadId}/notes`, [
           {
-            note_type: 'common',
+            note_type: 'service_message',
             params: {
+              service: 'Копирование сделок',
               text,
             },
           },
