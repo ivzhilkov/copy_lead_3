@@ -7,6 +7,7 @@ import { CopyJob } from 'src/types/copy-job';
 import * as uniqid from 'uniqid';
 
 const ARCHIVED_STATUS_IDS = new Set([142, 143]);
+const BUDGET_FIELD_TOKEN = -1000001;
 const EDITABLE_NOTE_TYPES = new Set([
   'common',
   'call_in',
@@ -180,14 +181,19 @@ export class CopyService {
 
     const body: any = {
       name: `Копия - ${lead.name || `Сделка ${leadId}`}`,
-      responsible_user_id: Number.isFinite(payload.responsibleId)
+      responsible_user_id: Number.isFinite(payload.responsibleId) && payload.responsibleId > 0
         ? payload.responsibleId
         : lead.responsible_user_id,
       pipeline_id: pipelineId,
       status_id: statusId,
       price: payload.budget ? Number(lead.price || 0) : 0,
       custom_fields_values: (lead.custom_fields_values || [])
-        .filter((cf) => payload.customFields.includes(Number(cf.field_id)))
+        .filter(
+          (cf) =>
+            Number.isFinite(Number(cf.field_id)) &&
+            Number(cf.field_id) > 0 &&
+            payload.customFields.includes(Number(cf.field_id)),
+        )
         .map((cf) => ({
           field_code: cf.field_code,
           field_id: cf.field_id,
@@ -237,9 +243,15 @@ export class CopyService {
       api.post('/api/v4/leads', [body]),
     ).then(({ data }) => data?._embedded?.leads?.[0]?.id);
 
+    if (newLeadId) {
+      await this.createCrossLinkNotes(api, account.url, leadId, Number(newLeadId));
+    }
+
     if (payload.notes && newLeadId) {
       try {
-        const noteBodies = (await this.getAllLeadNotes(api, leadId))
+        const noteBodies = (
+          await this.getLeadAndContactNotes(api, leadId, contactIds.filter((id) => Number.isFinite(id)))
+        )
           .filter((note) => EDITABLE_NOTE_TYPES.has(note.note_type))
           .map((note) => ({
             note_type: note.note_type,
@@ -271,15 +283,17 @@ export class CopyService {
 
   private normalizePayload(payload: CopyPayload): CopyPayload {
     const parsedResponsibleId = Number(payload?.responsibleId);
+    const parsedCustomFields = Array.isArray(payload?.customFields)
+      ? payload.customFields
+          .map((id) => Number(id))
+          .filter((id) => Number.isFinite(id))
+      : [];
+
     return {
       statusId: payload?.statusId || '',
-      responsibleId: Number.isFinite(parsedResponsibleId) ? parsedResponsibleId : 0,
-      customFields: Array.isArray(payload?.customFields)
-        ? payload.customFields
-            .map((id) => Number(id))
-            .filter((id) => Number.isFinite(id))
-        : [],
-      budget: Boolean(payload?.budget),
+      responsibleId: Number.isFinite(parsedResponsibleId) ? parsedResponsibleId : -1,
+      customFields: parsedCustomFields,
+      budget: Boolean(payload?.budget) || parsedCustomFields.includes(BUDGET_FIELD_TOKEN),
       linkedEntities: Boolean(payload?.linkedEntities),
       tags: payload?.tags !== false,
       notes: Boolean(payload?.notes),
@@ -346,14 +360,54 @@ export class CopyService {
     return false;
   }
 
-  private async getAllLeadNotes(api: AxiosInstance, leadId: number) {
+  private async getLeadAndContactNotes(
+    api: AxiosInstance,
+    leadId: number,
+    contactIds: number[],
+  ) {
+    const fromLead = await this.getAllEntityNotes(api, 'leads', leadId);
+    const fromContacts = await Promise.all(
+      contactIds
+        .filter((id) => Number.isFinite(id) && id > 0)
+        .map(async (contactId) => {
+          const notes = await this.getAllEntityNotes(api, 'contacts', contactId);
+          return notes.map((note) => ({
+            ...note,
+            __source_entity: `contact:${contactId}`,
+          }));
+        }),
+    ).then((chunks) => chunks.flat());
+
+    const all = [
+      ...fromLead.map((note) => ({ ...note, __source_entity: `lead:${leadId}` })),
+      ...fromContacts,
+    ];
+
+    const deduped = new Map<string, any>();
+    for (const note of all) {
+      const key = `${note.__source_entity || ''}:${String(note.id || '')}:${String(
+        note.created_at || '',
+      )}`;
+      if (!deduped.has(key)) deduped.set(key, note);
+    }
+
+    return Array.from(deduped.values()).sort(
+      (a, b) => Number(a?.created_at || 0) - Number(b?.created_at || 0),
+    );
+  }
+
+  private async getAllEntityNotes(
+    api: AxiosInstance,
+    entityType: 'leads' | 'contacts',
+    entityId: number,
+  ) {
     const notes: any[] = [];
     const limit = 250;
     let page = 1;
 
     while (true) {
       const data = await this.requestWithRetry(() =>
-        api.get(`/api/v4/leads/${leadId}/notes`, {
+        api.get(`/api/v4/${entityType}/${entityId}/notes`, {
           params: { page, limit },
         }),
       ).then(({ data }) => data);
@@ -367,6 +421,57 @@ export class CopyService {
     }
 
     return notes;
+  }
+
+  private async createCrossLinkNotes(
+    api: AxiosInstance,
+    accountUrl: string,
+    sourceLeadId: number,
+    newLeadId: number,
+  ) {
+    const sourceLeadUrl = this.getLeadUrl(accountUrl, sourceLeadId);
+    const newLeadUrl = this.getLeadUrl(accountUrl, newLeadId);
+
+    await this.safeCreateCommonNote(
+      api,
+      sourceLeadId,
+      `Создана копия сделки: ${newLeadUrl}`,
+    );
+    await this.safeCreateCommonNote(
+      api,
+      newLeadId,
+      `Сделка скопирована из: ${sourceLeadUrl}`,
+    );
+  }
+
+  private getLeadUrl(accountUrl: string, leadId: number) {
+    const base = String(accountUrl || '').replace(/\/$/, '');
+    return `${base}/leads/detail/${leadId}`;
+  }
+
+  private async safeCreateCommonNote(
+    api: AxiosInstance,
+    leadId: number,
+    text: string,
+  ) {
+    try {
+      await this.requestWithRetry(() =>
+        api.post(`/api/v4/leads/${leadId}/notes`, [
+          {
+            note_type: 'common',
+            params: {
+              text,
+            },
+          },
+        ]),
+      );
+    } catch (e) {
+      this.logger.warn(
+        `Не удалось создать служебное примечание для сделки ${leadId}: ${
+          (e as Error).message
+        }`,
+      );
+    }
   }
 
   private chunk<T>(items: T[], size: number) {
