@@ -1,7 +1,5 @@
-import { InjectQueue } from '@nestjs/bull';
 import { Injectable, Logger } from '@nestjs/common';
 import { AxiosError, AxiosInstance } from 'axios';
-import { Queue } from 'bull';
 import { Account } from 'src/accounts/account.entity';
 import { AccountsService } from 'src/accounts/accounts.service';
 import { CopyPayload } from 'src/interfaces/copy-payload.interface';
@@ -22,18 +20,25 @@ const EDITABLE_NOTE_TYPES = new Set([
   'attachment',
 ]);
 
+type CopyRequestState = {
+  accountId: number;
+  total: number;
+  completed: number;
+  failed: number;
+  results: any[];
+  createdAt: number;
+  finishedAt?: number;
+};
+
 @Injectable()
 export class CopyService {
   private readonly logger = new Logger(CopyService.name);
 
-  constructor(
-    @InjectQueue('copy-queue')
-    private copyQueue: Queue,
-    private accountsService: AccountsService,
-  ) {}
+  constructor(private accountsService: AccountsService) {}
 
-  private jobsMap: Record<string, CopyJob[]> = {};
+  private requestsMap: Record<string, CopyRequestState> = {};
   private requestOwnerMap: Record<string, number> = {};
+  private executionChain: Promise<void> = Promise.resolve();
 
   async addToQueue(leadIds: number[], payload: CopyPayload, account: Account) {
     const normalizedLeadIds = Array.from(
@@ -50,19 +55,60 @@ export class CopyService {
     const normalizedPayload = this.normalizePayload(payload);
     const requestId = uniqid();
     this.requestOwnerMap[requestId] = account.amoId;
-    this.jobsMap[requestId] = await this.copyQueue.addBulk(
-      normalizedLeadIds.map((leadId) => ({
-        name: 'copy',
-        data: { account, requestId, leadId, payload: normalizedPayload },
-      })),
-    );
+    this.requestsMap[requestId] = {
+      accountId: account.amoId,
+      total: normalizedLeadIds.length,
+      completed: 0,
+      failed: 0,
+      results: [],
+      createdAt: Date.now(),
+    };
+
+    normalizedLeadIds.forEach((leadId) => {
+      this.enqueueExecution(async () => {
+        const state = this.requestsMap[requestId];
+        if (!state) return;
+
+        try {
+          const result = await this.copy({
+            data: { account, requestId, leadId, payload: normalizedPayload },
+          } as CopyJob);
+          state.completed += 1;
+          state.results.push(result);
+        } catch (e) {
+          state.failed += 1;
+          state.results.push({
+            sourceLeadId: leadId,
+            skipped: false,
+            error: (e as Error)?.message || 'Ошибка копирования',
+          });
+          this.logger.error(
+            `Ошибка копирования сделки ${leadId} (requestId=${requestId}): ${
+              (e as Error)?.message || e
+            }`,
+          );
+        }
+
+        const done = state.completed + state.failed;
+        if (done >= state.total && !state.finishedAt) {
+          state.finishedAt = Date.now();
+          setTimeout(() => {
+            delete this.requestsMap[requestId];
+            delete this.requestOwnerMap[requestId];
+          }, 5 * 60 * 1000);
+        }
+
+        // Global throttle to avoid aggressive API bursts.
+        await this.sleep(350);
+      });
+    });
 
     return requestId;
   }
 
   async check(requestId: string, accountId?: number) {
-    const jobs = this.jobsMap[requestId];
-    if (!jobs || !jobs.length) {
+    const state = this.requestsMap[requestId];
+    if (!state) {
       return {
         total: 0,
         completed: 0,
@@ -80,35 +126,26 @@ export class CopyService {
       throw new Error('Некорректный запрос статуса');
     }
 
-    let completed = 0;
-    let failed = 0;
-    const total = jobs.length;
-    const results = await Promise.all(
-      jobs.map(async (job) => {
-        const state = await job.getState();
-        if (state === 'failed') {
-          failed++;
-        } else if (state === 'completed') {
-          completed++;
-          return job.finished();
-        }
-        return null;
-      }),
-    );
-
+    const total = state.total;
+    const completed = state.completed;
+    const failed = state.failed;
     const done = completed + failed;
-    if (done >= total) {
-      delete this.jobsMap[requestId];
-      delete this.requestOwnerMap[requestId];
-    }
 
     return {
       total,
       completed,
       failed,
       progress: total ? (done / total) * 100 : 100,
-      results: results.filter((i) => i),
+      results: state.results,
     };
+  }
+
+  private enqueueExecution(task: () => Promise<void>) {
+    const run = this.executionChain.then(task, task);
+    this.executionChain = run.then(
+      () => undefined,
+      () => undefined,
+    );
   }
 
   async copy(job: CopyJob) {

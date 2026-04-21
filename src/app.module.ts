@@ -6,7 +6,6 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from './auth/auth.module';
 import { ConfigModule } from '@nestjs/config';
 import { config } from './config';
-import { BullModule } from '@nestjs/bull';
 import { CopyModule } from './copy/copy.module';
 
 const toNumber = (value: string | undefined, fallback: number) => {
@@ -26,7 +25,6 @@ const parseConnectionUrl = (value: string | undefined) => {
 const mysqlUrl =
   parseConnectionUrl(process.env.MYSQL_URL) ||
   parseConnectionUrl(process.env.DATABASE_URL);
-const redisUrl = parseConnectionUrl(process.env.REDIS_URL);
 
 @Module({
   imports: [
@@ -65,28 +63,6 @@ const redisUrl = parseConnectionUrl(process.env.REDIS_URL);
         'database',
       autoLoadEntities: true,
       synchronize: true,
-    }),
-    BullModule.forRoot({
-      redis: {
-        host:
-          process.env.REDISHOST ||
-          process.env.REDIS_HOST ||
-          redisUrl?.hostname ||
-          'localhost',
-        port: toNumber(
-          process.env.REDISPORT ||
-            process.env.REDIS_PORT ||
-            (redisUrl?.port ? redisUrl.port : undefined),
-          6379,
-        ),
-        password:
-          process.env.REDISPASSWORD ||
-          process.env.REDIS_PASSWORD ||
-          (redisUrl?.password
-            ? decodeURIComponent(redisUrl.password)
-            : undefined) ||
-          undefined,
-      },
     }),
     AccountsModule,
     AuthModule,
