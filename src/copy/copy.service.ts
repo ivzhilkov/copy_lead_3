@@ -8,6 +8,11 @@ import * as uniqid from 'uniqid';
 
 const ARCHIVED_STATUS_IDS = new Set([142, 143]);
 const BUDGET_FIELD_TOKEN = -1000001;
+const CHAT_EVENT_TYPES = [
+  'incoming_chat_message',
+  'outgoing_chat_message',
+  'entity_direct_message',
+] as const;
 const EDITABLE_NOTE_TYPES = new Set([
   'common',
   'call_in',
@@ -268,6 +273,21 @@ export class CopyService {
           }`,
         );
       }
+
+      try {
+        await this.copyConversationEventsAsNotes(
+          api,
+          leadId,
+          contactIds.filter((id) => Number.isFinite(id)),
+          Number(newLeadId),
+        );
+      } catch (e) {
+        this.logger.warn(
+          `Не удалось подтянуть беседы для сделки ${leadId} -> ${newLeadId}: ${
+            (e as Error).message
+          }`,
+        );
+      }
     }
 
     if (newLeadId) {
@@ -430,6 +450,128 @@ export class CopyService {
     }
 
     return notes;
+  }
+
+  private async copyConversationEventsAsNotes(
+    api: AxiosInstance,
+    sourceLeadId: number,
+    contactIds: number[],
+    targetLeadId: number,
+  ) {
+    const events = await this.getChatEvents(api, sourceLeadId, contactIds);
+    if (!events.length) return;
+
+    const noteBodies = events
+      .map((event) => this.mapChatEventToServiceNote(event))
+      .filter(Boolean) as Array<{
+      note_type: 'service_message';
+      params: { service: string; text: string };
+      responsible_user_id?: number;
+    }>;
+
+    if (!noteBodies.length) return;
+
+    for (const chunk of this.chunk(noteBodies, 100)) {
+      if (!chunk.length) continue;
+      await this.requestWithRetry(() =>
+        api.post(`/api/v4/leads/${targetLeadId}/notes`, chunk),
+      );
+    }
+  }
+
+  private async getChatEvents(
+    api: AxiosInstance,
+    sourceLeadId: number,
+    contactIds: number[],
+  ) {
+    const fromLead = await this.getEntityChatEvents(api, 'lead', [sourceLeadId]);
+    const fromContacts = contactIds.length
+      ? await this.getEntityChatEvents(api, 'contact', contactIds)
+      : [];
+
+    const deduped = new Map<string, any>();
+    [...fromLead, ...fromContacts].forEach((event) => {
+      const id = String(event?.id || '');
+      const type = String(event?.type || '');
+      const messageId = String(event?.value_after?.[0]?.message?.id || '');
+      const key = `${id}:${type}:${messageId}`;
+      if (!deduped.has(key)) deduped.set(key, event);
+    });
+
+    return Array.from(deduped.values())
+      .filter((event) =>
+        CHAT_EVENT_TYPES.includes(String(event?.type || '') as any),
+      )
+      .sort((a, b) => Number(a?.created_at || 0) - Number(b?.created_at || 0))
+      .slice(-200);
+  }
+
+  private async getEntityChatEvents(
+    api: AxiosInstance,
+    entity: 'lead' | 'contact',
+    entityIds: number[],
+  ) {
+    const normalizedEntityIds = Array.from(
+      new Set(
+        (entityIds || [])
+          .map((id) => Number(id))
+          .filter((id) => Number.isFinite(id) && id > 0),
+      ),
+    );
+    if (!normalizedEntityIds.length) return [];
+
+    const events: any[] = [];
+    let page = 1;
+    const limit = 100;
+    const maxPages = 5;
+
+    while (page <= maxPages) {
+      const data = await this.requestWithRetry(() =>
+        api.get('/api/v4/events', {
+          params: {
+            page,
+            limit,
+            'order[created_at]': 'asc',
+            'filter[entity][]': [entity],
+            'filter[type][]': [...CHAT_EVENT_TYPES],
+            'filter[entity_id][]': normalizedEntityIds,
+          },
+        }),
+      ).then(({ data }) => data);
+
+      const current = data?._embedded?.events || [];
+      events.push(...current);
+
+      const hasNext = Boolean(data?._links?.next?.href);
+      if (!hasNext || current.length < limit) break;
+      page += 1;
+    }
+
+    return events;
+  }
+
+  private mapChatEventToServiceNote(event: any) {
+    const messageId = String(event?.value_after?.[0]?.message?.id || '').trim();
+    if (!messageId) return null;
+
+    const type = String(event?.type || '');
+    const prefix =
+      type === 'incoming_chat_message'
+        ? 'Беседа: входящее сообщение'
+        : type === 'outgoing_chat_message'
+          ? 'Беседа: исходящее сообщение'
+          : 'Беседа: внутреннее сообщение';
+
+    return {
+      note_type: 'service_message' as const,
+      params: {
+        service: 'Копирование сделок',
+        text: `${prefix} (message_id: ${messageId})`,
+      },
+      responsible_user_id: Number.isFinite(Number(event?.created_by))
+        ? Number(event.created_by)
+        : undefined,
+    };
   }
 
   private async createCrossLinkNotes(
