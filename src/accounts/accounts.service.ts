@@ -18,6 +18,12 @@ export class AccountsService {
   findByAmoId(amoId: number): Promise<Account> {
     return this.accountsRepo.findOne({ amoId });
   }
+
+  findAll(): Promise<Account[]> {
+    return this.accountsRepo.find({
+      order: { id: 'DESC' },
+    });
+  }
   create(data: Partial<Account>): Promise<Account> {
     return this.accountsRepo.save(data);
   }

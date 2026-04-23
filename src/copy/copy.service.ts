@@ -615,7 +615,6 @@ export class CopyService {
           },
         }),
       ).then(({ data }) => data);
-
       const current = data?._embedded?.events || [];
       events.push(...current);
 
@@ -623,7 +622,6 @@ export class CopyService {
       if (!hasNext || current.length < limit) break;
       page += 1;
     }
-
     return events;
   }
 

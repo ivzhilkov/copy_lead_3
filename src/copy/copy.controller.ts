@@ -13,6 +13,7 @@ import {
 import { ConfigService } from '@nestjs/config';
 import { AccountsService } from 'src/accounts/accounts.service';
 import { AuthGuard } from 'src/auth/auth.guard';
+import { BillingService } from 'src/billing/billing.service';
 import { CopyPayload } from 'src/interfaces/copy-payload.interface';
 import { Request } from 'src/types/request';
 import { CopyService } from './copy.service';
@@ -23,6 +24,7 @@ export class CopyController {
     private copyService: CopyService,
     private accountsService: AccountsService,
     private configService: ConfigService,
+    private billingService: BillingService,
   ) {}
 
   @UseGuards(AuthGuard)
@@ -32,6 +34,8 @@ export class CopyController {
     @Body('payload') payload: CopyPayload,
     @Req() req: Request,
   ) {
+    this.billingService.ensureCanCopyOrThrow(req.params.account);
+
     const requestId = await this.copyService.addToQueue(
       leadIds,
       payload,
@@ -70,6 +74,8 @@ export class CopyController {
     if (!account) {
       throw new BadRequestException('Аккаунт интеграции не найден');
     }
+
+    this.billingService.ensureCanCopyOrThrow(account);
 
     const requestId = await this.copyService.addToQueue(leadIds, payload, account);
     return { requestId };
@@ -123,6 +129,13 @@ export class CopyController {
           : (rawConfig as CopyPayload);
     } catch (e) {
       throw new BadRequestException('Некорректный JSON настроек Digital Pipeline');
+    }
+
+    if (!this.billingService.canCopy(req.params.account)) {
+      return {
+        skipped: true,
+        reason: 'billing_expired',
+      };
     }
 
     const requestId = await this.copyService.addToQueue(

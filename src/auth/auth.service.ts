@@ -26,11 +26,14 @@ export class AuthService {
         amoId: decoded.account_id,
         domain: query.referer,
         oauth,
+        installedAt: new Date(),
+        lastSeenAt: new Date(),
       });
     } else {
       await this.accountService.update(account.id, {
         domain: query.referer,
         oauth,
+        lastSeenAt: new Date(),
       });
     }
     return `https://${query.referer}`;
