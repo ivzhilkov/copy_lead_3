@@ -6,5 +6,6 @@ export interface CopyPayload {
   linkedEntities: boolean;
   tags: boolean;
   notes: boolean;
+  tasks: boolean;
   createIfContactHasDeal: boolean;
 }

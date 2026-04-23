@@ -290,6 +290,18 @@ export class CopyService {
       }
     }
 
+    if (payload.tasks && newLeadId) {
+      try {
+        await this.copyLeadTasks(api, leadId, Number(newLeadId));
+      } catch (e) {
+        this.logger.warn(
+          `Не удалось скопировать задачи для сделки ${leadId} -> ${newLeadId}: ${
+            (e as Error).message
+          }`,
+        );
+      }
+    }
+
     if (newLeadId) {
       await this.createCrossLinkNotes(api, account.url, leadId, Number(newLeadId));
     }
@@ -317,8 +329,73 @@ export class CopyService {
       linkedEntities: Boolean(payload?.linkedEntities),
       tags: payload?.tags !== false,
       notes: Boolean(payload?.notes),
+      tasks: Boolean(payload?.tasks),
       createIfContactHasDeal: payload?.createIfContactHasDeal !== false,
     };
+  }
+
+  private async copyLeadTasks(
+    api: AxiosInstance,
+    sourceLeadId: number,
+    targetLeadId: number,
+  ) {
+    const tasks = await this.getLeadTasks(api, sourceLeadId);
+    if (!tasks.length) return;
+
+    const mapped = tasks
+      .filter((task) => task?.is_completed !== true)
+      .map((task) => ({
+        text: String(task?.text || '').trim() || 'Задача из исходной сделки',
+        complete_till: Number.isFinite(Number(task?.complete_till))
+          ? Number(task.complete_till)
+          : undefined,
+        entity_id: targetLeadId,
+        entity_type: 'leads',
+        task_type_id: Number.isFinite(Number(task?.task_type_id))
+          ? Number(task.task_type_id)
+          : undefined,
+        responsible_user_id: Number.isFinite(Number(task?.responsible_user_id))
+          ? Number(task.responsible_user_id)
+          : undefined,
+      }))
+      .filter((task) => task.text);
+
+    for (const chunk of this.chunk(mapped, 50)) {
+      if (!chunk.length) continue;
+      await this.requestWithRetry(() => api.post('/api/v4/tasks', chunk));
+    }
+  }
+
+  private async getLeadTasks(
+    api: AxiosInstance,
+    leadId: number,
+  ) {
+    const tasks: any[] = [];
+    const limit = 250;
+    let page = 1;
+
+    while (true) {
+      const data = await this.requestWithRetry(() =>
+        api.get('/api/v4/tasks', {
+          params: {
+            page,
+            limit,
+            'filter[entity_type]': 'leads',
+            'filter[entity_id]': leadId,
+            'order[id]': 'asc',
+          },
+        }),
+      ).then(({ data }) => data);
+
+      const current = data?._embedded?.tasks || [];
+      tasks.push(...current);
+
+      const hasNext = Boolean(data?._links?.next?.href);
+      if (!hasNext || current.length < limit) break;
+      page += 1;
+    }
+
+    return tasks;
   }
 
   private parseStatus(statusId: string) {
