@@ -82,16 +82,15 @@ export class CopyService {
           state.completed += 1;
           state.results.push(result);
         } catch (e) {
+          const errorMessage = this.formatCopyError(e);
           state.failed += 1;
           state.results.push({
             sourceLeadId: leadId,
             skipped: false,
-            error: (e as Error)?.message || 'Ошибка копирования',
+            error: errorMessage,
           });
           this.logger.error(
-            `Ошибка копирования сделки ${leadId} (requestId=${requestId}): ${
-              (e as Error)?.message || e
-            }`,
+            `Ошибка копирования сделки ${leadId} (requestId=${requestId}): ${errorMessage}`,
           );
         }
 
@@ -144,6 +143,36 @@ export class CopyService {
       progress: total ? (done / total) * 100 : 100,
       results: state.results,
     };
+  }
+
+  private formatCopyError(error: unknown) {
+    const axiosError = error as AxiosError;
+    const status = axiosError?.response?.status;
+    const responseData = axiosError?.response?.data;
+    const baseMessage =
+      error instanceof Error
+        ? error.message
+        : String(error || 'Ошибка копирования');
+
+    let responseText = '';
+    if (typeof responseData === 'string') {
+      responseText = responseData;
+    } else if (responseData) {
+      try {
+        responseText = JSON.stringify(responseData);
+      } catch (e) {
+        responseText = String(responseData);
+      }
+    }
+
+    return [
+      status ? `HTTP ${status}` : '',
+      baseMessage,
+      responseText ? `amoCRM: ${responseText}` : '',
+    ]
+      .filter(Boolean)
+      .join('. ')
+      .slice(0, 1200);
   }
 
   private enqueueExecution(task: () => Promise<void>) {
