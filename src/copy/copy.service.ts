@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { AxiosError, AxiosInstance } from 'axios';
+import { ConfigService } from '@nestjs/config';
+import axios, { AxiosError, AxiosInstance } from 'axios';
 import { Account } from 'src/accounts/account.entity';
 import { AccountsService } from 'src/accounts/accounts.service';
 import { CopyPayload } from 'src/interfaces/copy-payload.interface';
@@ -40,7 +41,10 @@ type CopyRequestState = {
 export class CopyService {
   private readonly logger = new Logger(CopyService.name);
 
-  constructor(private accountsService: AccountsService) {}
+  constructor(
+    private accountsService: AccountsService,
+    private configService: ConfigService,
+  ) {}
 
   private requestsMap: Record<string, CopyRequestState> = {};
   private requestOwnerMap: Record<string, number> = {};
@@ -92,6 +96,7 @@ export class CopyService {
           this.logger.error(
             `Ошибка копирования сделки ${leadId} (requestId=${requestId}): ${errorMessage}`,
           );
+          await this.notifyCopyFailure(account, leadId, requestId, errorMessage);
         }
 
         const done = state.completed + state.failed;
@@ -173,6 +178,41 @@ export class CopyService {
       .filter(Boolean)
       .join('. ')
       .slice(0, 1200);
+  }
+
+  private async notifyCopyFailure(
+    account: Account,
+    leadId: number,
+    requestId: string,
+    errorMessage: string,
+  ) {
+    const token = this.configService.get<string>('telegramBotToken');
+    const chatId = this.configService.get<string>('telegramChatId');
+    if (!token || !chatId) return;
+
+    const text = [
+      'Ошибка копирования сделки',
+      '',
+      `Домен: ${account.domain || '-'}`,
+      `Account ID: ${account.amoId || '-'}`,
+      `Сделка: ${leadId}`,
+      `Request ID: ${requestId}`,
+      '',
+      `Ошибка: ${errorMessage || '-'}`,
+    ].join('\n');
+
+    try {
+      await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
+        chat_id: chatId,
+        text: text.slice(0, 3900),
+      });
+    } catch (e) {
+      this.logger.warn(
+        `Не удалось отправить ошибку копирования в Telegram: ${
+          (e as Error)?.message || e
+        }`,
+      );
+    }
   }
 
   private enqueueExecution(task: () => Promise<void>) {
