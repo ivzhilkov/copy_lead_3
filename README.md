@@ -17,6 +17,9 @@ Set these in Railway service variables:
 - `CLIENT_SECRET`
 - `WIDGET_CODE`
 - `REDIRECT_URI` (example: `https://<your-domain>.up.railway.app/auth/callback`)
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+- `ADMIN_TOKEN` (any long private password for `/billing/admin/panel`)
 
 ## Database variables (choose one of variants)
 

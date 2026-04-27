@@ -249,7 +249,7 @@ export class BillingService {
 
     if (!token || !chatId) {
       this.logger.warn('TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID не заданы, сообщение не отправлено');
-      return;
+      return false;
     }
 
     try {
@@ -257,8 +257,10 @@ export class BillingService {
         chat_id: chatId,
         text,
       });
+      return true;
     } catch (e) {
       this.logger.error(`Ошибка отправки telegram сообщения: ${(e as Error)?.message || e}`);
+      return false;
     }
   }
 
@@ -445,6 +447,25 @@ export class BillingService {
     };
   }
 
+  async sendTestTelegramMessage() {
+    const sent = await this.sendTelegramMessage(
+      [
+        'Тестовое сообщение виджета Копирование сделок',
+        '',
+        'Если вы видите это сообщение, Telegram-уведомления настроены корректно.',
+        '',
+        `Время: ${this.getMskTimestamp()}`,
+      ].join('\n'),
+    );
+
+    return {
+      ok: sent,
+      message: sent
+        ? 'Тестовое сообщение отправлено в Telegram'
+        : 'Не удалось отправить тестовое сообщение. Проверьте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID в Railway.',
+    };
+  }
+
   ensureCanCopyOrThrow(account: Account) {
     const status = this.toPublicLicenseView(account);
     if (status.canCopy) return status;
@@ -551,6 +572,7 @@ export class BillingService {
       <label>Admin token:</label>
       <input id="token" style="min-width:320px" />
       <button onclick="loadAccounts()">Загрузить</button>
+      <button onclick="testTelegram()">Проверить Telegram</button>
     </div>
   </div>
 
@@ -631,6 +653,24 @@ export class BillingService {
         return;
       }
       await loadAccounts();
+    }
+
+    async function testTelegram(){
+      const token = document.getElementById('token').value.trim();
+      const res = await fetch('/billing/admin/test-telegram', {
+        headers: { 'x-admin-token': token }
+      });
+      const text = await res.text();
+      if(!res.ok){
+        alert('Ошибка Telegram-теста: ' + text);
+        return;
+      }
+      try {
+        const data = JSON.parse(text);
+        alert(data.message || 'Готово');
+      } catch (e) {
+        alert(text || 'Готово');
+      }
     }
   </script>
 </body>

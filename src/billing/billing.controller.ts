@@ -80,6 +80,12 @@ export class BillingController {
     return this.billingService.getAdminAccounts();
   }
 
+  @Get('/admin/test-telegram')
+  async testTelegram(@Req() req: Request) {
+    this.billingService.ensureAdminTokenOrThrow(String(req.headers['x-admin-token'] || ''));
+    return this.billingService.sendTestTelegramMessage();
+  }
+
   @Post('/admin/account/:amoId/extend')
   async extendByDays(
     @Req() req: Request,
