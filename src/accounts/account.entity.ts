@@ -1,4 +1,5 @@
 import { OAuthField } from 'src/interfaces/oauth-field.interface';
+import { normalizeAmoDomain } from 'src/helpers/amo-domain';
 import { Entity, Column, PrimaryGeneratedColumn } from 'typeorm';
 
 @Entity()
@@ -13,7 +14,7 @@ export class Account {
   domain: string;
 
   get url(): string {
-    return `https://${this.domain}`;
+    return `https://${normalizeAmoDomain(this.domain)}`;
   }
 
   @Column({ type: 'json' })

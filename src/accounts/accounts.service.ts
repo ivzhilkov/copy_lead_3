@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import axios, { AxiosInstance } from 'axios';
 import { AuthService } from 'src/auth/auth.service';
 import { GrantTypes } from 'src/enums/grant-types.enum';
+import { normalizeAmoDomain } from 'src/helpers/amo-domain';
 import { Repository } from 'typeorm';
 import { Account } from './account.entity';
 
@@ -42,13 +43,15 @@ export class AccountsService {
           account = await this.findByAmoId(amoId);
         }
         const { oauth } = account;
+        const accountDomain = normalizeAmoDomain(account.domain);
         if (oauth.expire - 60 * 1000 < Number(new Date())) {
           account = await this.update(account.id, {
             oauth: await this.authService.getNewTokens(
               oauth.refreshToken,
-              account.domain,
+              accountDomain,
               GrantTypes.RefreshToken,
             ),
+            domain: accountDomain,
           });
         }
         config.baseURL = account.url;

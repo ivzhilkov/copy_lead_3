@@ -10,6 +10,7 @@ import { ConfigService } from '@nestjs/config';
 import axios from 'axios';
 import { Account } from 'src/accounts/account.entity';
 import { AccountsService } from 'src/accounts/accounts.service';
+import { normalizeAmoDomain } from 'src/helpers/amo-domain';
 
 export type LicenseState =
   | 'not_activated'
@@ -287,9 +288,11 @@ export class BillingService {
 
   private async upsertProfile(account: Account, profile?: PublicProfilePayload) {
     const normalized = this.serializeProfile(profile);
+    const normalizedDomain = normalizeAmoDomain(
+      normalized.domain !== '-' ? normalized.domain : account.domain,
+    );
     const updatePayload: Partial<Account> = {
-      domain:
-        normalized.domain !== '-' ? normalized.domain : account.domain,
+      domain: normalizedDomain || account.domain,
       adminName: normalized.userName !== '-' ? normalized.userName : account.adminName,
       adminEmail: normalized.email !== '-' ? normalized.email : account.adminEmail,
       adminPhone: normalized.phone !== '-' ? normalized.phone : account.adminPhone,
@@ -304,8 +307,7 @@ export class BillingService {
   }
 
   private getDomain(account: Account, profile?: PublicProfilePayload) {
-    const raw = String(profile?.domain || account.domain || '').trim();
-    return raw.replace(/^https?:\/\//, '').replace(/\/$/, '');
+    return normalizeAmoDomain(profile?.domain || account.domain);
   }
 
   async trackInstall(payload: InstallPayload) {
