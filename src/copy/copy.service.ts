@@ -1,10 +1,15 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { InjectQueue } from '@nestjs/bull';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosError, AxiosInstance } from 'axios';
+import { Queue } from 'bull';
+import { InjectRepository } from '@nestjs/typeorm';
 import { Account } from 'src/accounts/account.entity';
 import { AccountsService } from 'src/accounts/accounts.service';
 import { CopyPayload } from 'src/interfaces/copy-payload.interface';
 import { CopyJob } from 'src/types/copy-job';
+import { Repository } from 'typeorm';
+import { CopyRequest } from './copy-request.entity';
 import * as uniqid from 'uniqid';
 
 const ARCHIVED_STATUS_IDS = new Set([142, 143]);
@@ -27,16 +32,6 @@ const EDITABLE_NOTE_TYPES = new Set([
   'attachment',
 ]);
 
-type CopyRequestState = {
-  accountId: number;
-  total: number;
-  completed: number;
-  failed: number;
-  results: any[];
-  createdAt: number;
-  finishedAt?: number;
-};
-
 @Injectable()
 export class CopyService {
   private readonly logger = new Logger(CopyService.name);
@@ -44,11 +39,14 @@ export class CopyService {
   constructor(
     private accountsService: AccountsService,
     private configService: ConfigService,
+    @InjectQueue('copy-queue')
+    private readonly copyQueue: Queue,
+    @InjectRepository(CopyRequest)
+    private readonly copyRequestsRepo: Repository<CopyRequest>,
   ) {}
 
-  private requestsMap: Record<string, CopyRequestState> = {};
-  private requestOwnerMap: Record<string, number> = {};
-  private executionChain: Promise<void> = Promise.resolve();
+  private globalNextRequestAt = 0;
+  private readonly accountNextRequestAt = new Map<number, number>();
 
   async addToQueue(leadIds: number[], payload: CopyPayload, account: Account) {
     const normalizedLeadIds = Array.from(
@@ -64,60 +62,65 @@ export class CopyService {
 
     const normalizedPayload = this.normalizePayload(payload);
     const requestId = uniqid();
-    this.requestOwnerMap[requestId] = account.amoId;
-    this.requestsMap[requestId] = {
+
+    await this.copyRequestsRepo.save({
+      id: requestId,
       accountId: account.amoId,
       total: normalizedLeadIds.length,
       completed: 0,
       failed: 0,
       results: [],
-      createdAt: Date.now(),
-    };
-
-    normalizedLeadIds.forEach((leadId) => {
-      this.enqueueExecution(async () => {
-        const state = this.requestsMap[requestId];
-        if (!state) return;
-
-        try {
-          const result = await this.copy({
-            data: { account, requestId, leadId, payload: normalizedPayload },
-          } as CopyJob);
-          state.completed += 1;
-          state.results.push(result);
-        } catch (e) {
-          const errorMessage = this.formatCopyError(e);
-          state.failed += 1;
-          state.results.push({
-            sourceLeadId: leadId,
-            skipped: false,
-            error: errorMessage,
-          });
-          this.logger.error(
-            `Ошибка копирования сделки ${leadId} (requestId=${requestId}): ${errorMessage}`,
-          );
-          await this.notifyCopyFailure(account, leadId, requestId, errorMessage);
-        }
-
-        const done = state.completed + state.failed;
-        if (done >= state.total && !state.finishedAt) {
-          state.finishedAt = Date.now();
-          setTimeout(() => {
-            delete this.requestsMap[requestId];
-            delete this.requestOwnerMap[requestId];
-          }, 5 * 60 * 1000);
-        }
-
-        // Global throttle to avoid aggressive API bursts.
-        await this.sleep(350);
-      });
+      status: 'queued',
+      finishedAt: null,
     });
+
+    await Promise.all(
+      normalizedLeadIds.map((leadId) =>
+        this.copyQueue.add('copy', {
+          accountId: account.amoId,
+          requestId,
+          leadId,
+          payload: normalizedPayload,
+        }),
+      ),
+    );
 
     return requestId;
   }
 
+  async processQueueJob(job: CopyJob) {
+    const { accountId, requestId, leadId, payload } = job.data;
+    const account = await this.accountsService.findByAmoId(Number(accountId));
+    if (!account) {
+      await this.markCopyResult(requestId, {
+        sourceLeadId: leadId,
+        skipped: false,
+        error: 'Аккаунт интеграции не найден',
+      });
+      return;
+    }
+
+    try {
+      const result = await this.copy({
+        data: { account, requestId, leadId, payload },
+      } as any);
+      await this.markCopyResult(requestId, result);
+    } catch (e) {
+      const errorMessage = this.formatCopyError(e);
+      await this.markCopyResult(requestId, {
+        sourceLeadId: leadId,
+        skipped: false,
+        error: errorMessage,
+      });
+      this.logger.error(
+        `Ошибка копирования сделки ${leadId} (requestId=${requestId}): ${errorMessage}`,
+      );
+      await this.notifyCopyFailure(account, leadId, requestId, errorMessage);
+    }
+  }
+
   async check(requestId: string, accountId?: number) {
-    const state = this.requestsMap[requestId];
+    const state = await this.copyRequestsRepo.findOne(requestId);
     if (!state) {
       return {
         total: 0,
@@ -130,8 +133,8 @@ export class CopyService {
 
     if (
       Number.isFinite(accountId) &&
-      this.requestOwnerMap[requestId] &&
-      this.requestOwnerMap[requestId] !== accountId
+      state.accountId &&
+      state.accountId !== accountId
     ) {
       throw new Error('Некорректный запрос статуса');
     }
@@ -146,8 +149,30 @@ export class CopyService {
       completed,
       failed,
       progress: total ? (done / total) * 100 : 100,
-      results: state.results,
+      results: state.results || [],
     };
+  }
+
+  private async markCopyResult(requestId: string, result: any) {
+    const state = await this.copyRequestsRepo.findOne(requestId);
+    if (!state) return;
+
+    const results = Array.isArray(state.results) ? [...state.results] : [];
+    results.push(result);
+
+    const completed = state.completed + (result?.error ? 0 : 1);
+    const failed = state.failed + (result?.error ? 1 : 0);
+    const done = completed + failed;
+    const finishedAt = done >= state.total ? new Date() : state.finishedAt;
+
+    await this.copyRequestsRepo.save({
+      ...state,
+      completed,
+      failed,
+      results,
+      status: finishedAt ? 'finished' : 'running',
+      finishedAt,
+    });
   }
 
   private formatCopyError(error: unknown) {
@@ -215,19 +240,22 @@ export class CopyService {
     }
   }
 
-  private enqueueExecution(task: () => Promise<void>) {
-    const run = this.executionChain.then(task, task);
-    this.executionChain = run.then(
-      () => undefined,
-      () => undefined,
-    );
-  }
-
-  async copy(job: CopyJob) {
+  async copy(job: {
+    data: {
+      account: Account;
+      requestId: string;
+      leadId: number;
+      payload: CopyPayload;
+    };
+  }) {
     const {
       data: { account, leadId, payload },
     } = job;
     const api = this.accountsService.createConnector(account.amoId);
+    api.interceptors.request.use(async (config) => {
+      await this.waitForAmoSlot(account.amoId);
+      return config;
+    });
     const { pipelineId, statusId } = this.parseStatus(payload.statusId);
 
     const lead = await this.requestWithRetry(() =>
@@ -255,9 +283,10 @@ export class CopyService {
 
     const body: any = {
       name: `Копия - ${lead.name || `Сделка ${leadId}`}`,
-      responsible_user_id: Number.isFinite(payload.responsibleId) && payload.responsibleId > 0
-        ? payload.responsibleId
-        : lead.responsible_user_id,
+      responsible_user_id:
+        Number.isFinite(payload.responsibleId) && payload.responsibleId > 0
+          ? payload.responsibleId
+          : lead.responsible_user_id,
       pipeline_id: pipelineId,
       status_id: statusId,
       price: payload.budget ? Number(lead.price || 0) : 0,
@@ -320,7 +349,11 @@ export class CopyService {
     if (payload.notes && newLeadId) {
       try {
         const noteBodies = (
-          await this.getLeadAndContactNotes(api, leadId, contactIds.filter((id) => Number.isFinite(id)))
+          await this.getLeadAndContactNotes(
+            api,
+            leadId,
+            contactIds.filter((id) => Number.isFinite(id)),
+          )
         )
           .filter((note) => EDITABLE_NOTE_TYPES.has(note.note_type))
           .map((note) => ({
@@ -372,7 +405,12 @@ export class CopyService {
     }
 
     if (newLeadId) {
-      await this.createCrossLinkNotes(api, account.url, leadId, Number(newLeadId));
+      await this.createCrossLinkNotes(
+        api,
+        account.url,
+        leadId,
+        Number(newLeadId),
+      );
     }
 
     return {
@@ -392,9 +430,13 @@ export class CopyService {
 
     return {
       statusId: payload?.statusId || '',
-      responsibleId: Number.isFinite(parsedResponsibleId) ? parsedResponsibleId : -1,
+      responsibleId: Number.isFinite(parsedResponsibleId)
+        ? parsedResponsibleId
+        : -1,
       customFields: parsedCustomFields,
-      budget: Boolean(payload?.budget) || parsedCustomFields.includes(BUDGET_FIELD_TOKEN),
+      budget:
+        Boolean(payload?.budget) ||
+        parsedCustomFields.includes(BUDGET_FIELD_TOKEN),
       linkedEntities: Boolean(payload?.linkedEntities),
       tags: payload?.tags !== false,
       notes: Boolean(payload?.notes),
@@ -435,10 +477,7 @@ export class CopyService {
     }
   }
 
-  private async getLeadTasks(
-    api: AxiosInstance,
-    leadId: number,
-  ) {
+  private async getLeadTasks(api: AxiosInstance, leadId: number) {
     const tasks: any[] = [];
     const limit = 250;
     let page = 1;
@@ -537,7 +576,11 @@ export class CopyService {
         .filter((id) => Number.isFinite(id) && id > 0)
         .map(async (contactId) => {
           try {
-            const notes = await this.getAllEntityNotes(api, 'contacts', contactId);
+            const notes = await this.getAllEntityNotes(
+              api,
+              'contacts',
+              contactId,
+            );
             return notes.map((note) => ({
               ...note,
               __source_entity: `contact:${contactId}`,
@@ -554,15 +597,18 @@ export class CopyService {
     ).then((chunks) => chunks.flat());
 
     const all = [
-      ...fromLead.map((note) => ({ ...note, __source_entity: `lead:${leadId}` })),
+      ...fromLead.map((note) => ({
+        ...note,
+        __source_entity: `lead:${leadId}`,
+      })),
       ...fromContacts,
     ];
 
     const deduped = new Map<string, any>();
     for (const note of all) {
-      const key = `${note.__source_entity || ''}:${String(note.id || '')}:${String(
-        note.created_at || '',
-      )}`;
+      const key = `${note.__source_entity || ''}:${String(
+        note.id || '',
+      )}:${String(note.created_at || '')}`;
       if (!deduped.has(key)) deduped.set(key, note);
     }
 
@@ -630,7 +676,9 @@ export class CopyService {
     sourceLeadId: number,
     contactIds: number[],
   ) {
-    const fromLead = await this.getEntityChatEvents(api, 'lead', [sourceLeadId]);
+    const fromLead = await this.getEntityChatEvents(api, 'lead', [
+      sourceLeadId,
+    ]);
     const fromContacts = contactIds.length
       ? await this.getEntityChatEvents(api, 'contact', contactIds)
       : [];
@@ -703,8 +751,8 @@ export class CopyService {
       type === 'incoming_chat_message'
         ? 'Беседа: входящее сообщение'
         : type === 'outgoing_chat_message'
-          ? 'Беседа: исходящее сообщение'
-          : 'Беседа: внутреннее сообщение';
+        ? 'Беседа: исходящее сообщение'
+        : 'Беседа: внутреннее сообщение';
 
     return {
       note_type: 'service_message' as const,
@@ -820,6 +868,27 @@ export class CopyService {
     }
 
     throw lastError;
+  }
+
+  private async waitForAmoSlot(accountId: number) {
+    const now = Date.now();
+    const globalIntervalMs = 180; // ~5.5 requests/sec for the integration.
+    const accountIntervalMs = 240; // ~4 requests/sec per amoCRM account.
+
+    const globalWait = Math.max(0, this.globalNextRequestAt - now);
+    const accountWait = Math.max(
+      0,
+      (this.accountNextRequestAt.get(accountId) || 0) - now,
+    );
+    const wait = Math.max(globalWait, accountWait);
+
+    if (wait > 0) {
+      await this.sleep(wait);
+    }
+
+    const base = Date.now();
+    this.globalNextRequestAt = base + globalIntervalMs;
+    this.accountNextRequestAt.set(accountId, base + accountIntervalMs);
   }
 
   private async sleep(ms: number) {

@@ -1,12 +1,14 @@
 import { OAuthField } from 'src/interfaces/oauth-field.interface';
 import { normalizeAmoDomain } from 'src/helpers/amo-domain';
-import { Entity, Column, PrimaryGeneratedColumn } from 'typeorm';
+import { encryptedJsonTransformer } from 'src/security/encrypted-json.transformer';
+import { Entity, Column, PrimaryGeneratedColumn, Index } from 'typeorm';
 
 @Entity()
 export class Account {
   @PrimaryGeneratedColumn()
   id: number;
 
+  @Index('IDX_account_amoId_unique', { unique: true })
   @Column()
   amoId: number;
 
@@ -17,7 +19,7 @@ export class Account {
     return `https://${normalizeAmoDomain(this.domain)}`;
   }
 
-  @Column({ type: 'json' })
+  @Column({ type: 'longtext', transformer: encryptedJsonTransformer })
   oauth: OAuthField;
 
   @Column({ type: 'datetime', nullable: true })
