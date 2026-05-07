@@ -244,6 +244,23 @@ export class BillingService {
     };
   }
 
+  private toPendingAccountView(): LicenseView {
+    return {
+      state: 'not_activated',
+      title: 'Требуется авторизация',
+      message:
+        'Интеграция еще не получила доступ к amoCRM. Откройте виджет после завершения установки.',
+      expiresAt: null,
+      isExpired: true,
+      canCopy: false,
+      trialActivated: false,
+      trialEndsAt: null,
+      paidUntil: null,
+      graceExtendedUntil: null,
+      graceExtensionUsed: false,
+    };
+  }
+
   private async sendTelegramMessage(text: string) {
     const token = this.configService.get<string>('telegramBotToken');
     const chatId = this.configService.get<string>('telegramChatId');
@@ -297,6 +314,41 @@ export class BillingService {
     return account;
   }
 
+  private async getAccountOrNull(accountId: number, widgetCode: string) {
+    const normalizedAccountId = Number(accountId);
+    if (!Number.isFinite(normalizedAccountId) || normalizedAccountId <= 0) {
+      throw new BadRequestException('Некорректный account_id');
+    }
+
+    const integration = await this.getIntegrationOrFail(widgetCode);
+    return this.accountsService.findByAmoId(
+      normalizedAccountId,
+      integration.widgetCode,
+    );
+  }
+
+  private async upsertPendingClient(
+    accountId: number,
+    profile?: PublicProfilePayload,
+  ) {
+    const normalized = this.serializeProfile(profile);
+    const domain = normalizeAmoDomain(
+      normalized.domain !== '-' ? normalized.domain : '',
+    );
+
+    if (!domain) return null;
+
+    return this.accountsService.upsertClient({
+      amoId: Number(accountId),
+      domain,
+      adminName: normalized.userName !== '-' ? normalized.userName : null,
+      adminEmail: normalized.email !== '-' ? normalized.email : null,
+      adminPhone: normalized.phone !== '-' ? normalized.phone : null,
+      adminUserId: normalized.userId !== null ? normalized.userId : null,
+      usersCount: normalized.usersCount > 0 ? normalized.usersCount : 0,
+    });
+  }
+
   private async upsertProfile(account: Account, profile?: PublicProfilePayload) {
     const normalized = this.serializeProfile(profile);
     const normalizedDomain = normalizeAmoDomain(
@@ -332,10 +384,32 @@ export class BillingService {
   }
 
   async trackInstall(payload: InstallPayload) {
-    const account = await this.getAccountOrFail(
+    const account = await this.getAccountOrNull(
       payload.accountId,
       payload.widgetCode,
     );
+
+    if (!account) {
+      await this.upsertPendingClient(payload.accountId, payload.profile);
+      const normalized = this.serializeProfile(payload.profile);
+      await this.sendTelegramMessage(
+        [
+          '🚀 Новая установка виджета Копирование сделок!',
+          '',
+          `🌐 Домен: ${normalized.domain}`,
+          `📧 Email: ${normalized.email}`,
+          `📱 Телефон: ${normalized.phone}`,
+          `👤 Пользователь: ${normalized.userName}`,
+          `🏢 Account ID: ${payload.accountId}`,
+          '',
+          'OAuth-авторизация еще не завершена.',
+          '',
+          `⏰ ${this.getMskTimestamp()}`,
+        ].join('\n'),
+      );
+      return this.toPendingAccountView();
+    }
+
     const updated = await this.upsertProfile(account, payload.profile);
 
     if (!updated.installNotifiedAt) {
@@ -366,15 +440,20 @@ export class BillingService {
   }
 
   async getPublicStatus(accountId: number, widgetCode: string) {
-    const account = await this.getAccountOrFail(accountId, widgetCode);
+    const account = await this.getAccountOrNull(accountId, widgetCode);
+    if (!account) return this.toPendingAccountView();
     return this.toPublicLicenseView(account);
   }
 
   async activateTrial(payload: ActivateTrialPayload) {
-    const account = await this.getAccountOrFail(
+    const account = await this.getAccountOrNull(
       payload.accountId,
       payload.widgetCode,
     );
+    if (!account) {
+      await this.upsertPendingClient(payload.accountId, payload.profile);
+      return this.toPendingAccountView();
+    }
     const profileUpdated = await this.upsertProfile(account, payload.profile);
 
     const { state } = this.calculateState(profileUpdated);
@@ -417,10 +496,19 @@ export class BillingService {
   }
 
   async requestPayment(payload: RequestPaymentPayload) {
-    const account = await this.getAccountOrFail(
+    const account = await this.getAccountOrNull(
       payload.accountId,
       payload.widgetCode,
     );
+    if (!account) {
+      await this.upsertPendingClient(payload.accountId, payload.profile);
+      return {
+        extended: false,
+        status: this.toPendingAccountView(),
+        message:
+          'Сначала нужно завершить авторизацию виджета в amoCRM, потом можно запросить оплату.',
+      };
+    }
     const profileUpdated = await this.upsertProfile(account, payload.profile);
     const statusBefore = this.toPublicLicenseView(profileUpdated);
 
