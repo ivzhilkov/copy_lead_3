@@ -265,20 +265,31 @@ export class BillingService {
     }
   }
 
-  private assertWidgetCode(widgetCode: string) {
-    const expected = this.configService.get<string>('widgetCode');
-    if (!expected || widgetCode !== expected) {
+  private async getIntegrationOrFail(widgetCode: string) {
+    const integration =
+      await this.accountsService.findIntegrationCredentialsByWidgetCode(
+        widgetCode,
+      );
+    if (!integration) {
       throw new ForbiddenException('Неверный код виджета');
     }
+
+    return integration;
   }
 
-  private async getAccountOrFail(accountId: number) {
+  private async getAccountOrFail(accountId: number, widgetCode?: string) {
     const normalizedAccountId = Number(accountId);
     if (!Number.isFinite(normalizedAccountId) || normalizedAccountId <= 0) {
       throw new BadRequestException('Некорректный account_id');
     }
 
-    const account = await this.accountsService.findByAmoId(normalizedAccountId);
+    const integration = widgetCode
+      ? await this.getIntegrationOrFail(widgetCode)
+      : null;
+    const account = await this.accountsService.findByAmoId(
+      normalizedAccountId,
+      integration?.widgetCode,
+    );
     if (!account) {
       throw new NotFoundException('Аккаунт интеграции не найден');
     }
@@ -303,7 +314,17 @@ export class BillingService {
       lastSeenAt: this.getNow(),
     };
 
-    return this.accountsService.update(account.id, updatePayload);
+    const saved = await this.accountsService.update(account.id, updatePayload);
+    await this.accountsService.upsertClient({
+      amoId: saved.amoId,
+      domain: saved.domain,
+      adminName: saved.adminName,
+      adminEmail: saved.adminEmail,
+      adminPhone: saved.adminPhone,
+      adminUserId: saved.adminUserId,
+      usersCount: saved.usersCount || 0,
+    });
+    return saved;
   }
 
   private getDomain(account: Account, profile?: PublicProfilePayload) {
@@ -311,8 +332,10 @@ export class BillingService {
   }
 
   async trackInstall(payload: InstallPayload) {
-    this.assertWidgetCode(payload.widgetCode);
-    const account = await this.getAccountOrFail(payload.accountId);
+    const account = await this.getAccountOrFail(
+      payload.accountId,
+      payload.widgetCode,
+    );
     const updated = await this.upsertProfile(account, payload.profile);
 
     if (!updated.installNotifiedAt) {
@@ -343,14 +366,15 @@ export class BillingService {
   }
 
   async getPublicStatus(accountId: number, widgetCode: string) {
-    this.assertWidgetCode(widgetCode);
-    const account = await this.getAccountOrFail(accountId);
+    const account = await this.getAccountOrFail(accountId, widgetCode);
     return this.toPublicLicenseView(account);
   }
 
   async activateTrial(payload: ActivateTrialPayload) {
-    this.assertWidgetCode(payload.widgetCode);
-    const account = await this.getAccountOrFail(payload.accountId);
+    const account = await this.getAccountOrFail(
+      payload.accountId,
+      payload.widgetCode,
+    );
     const profileUpdated = await this.upsertProfile(account, payload.profile);
 
     const { state } = this.calculateState(profileUpdated);
@@ -393,8 +417,10 @@ export class BillingService {
   }
 
   async requestPayment(payload: RequestPaymentPayload) {
-    this.assertWidgetCode(payload.widgetCode);
-    const account = await this.getAccountOrFail(payload.accountId);
+    const account = await this.getAccountOrFail(
+      payload.accountId,
+      payload.widgetCode,
+    );
     const profileUpdated = await this.upsertProfile(account, payload.profile);
     const statusBefore = this.toPublicLicenseView(profileUpdated);
 
@@ -505,13 +531,93 @@ export class BillingService {
   }
 
   async getAdminAccounts() {
+    const clients = await this.accountsService.findAllClients();
     const accounts = await this.accountsService.findAll();
-    return accounts.map((account) => {
+    const clientRows = clients.map((client) => ({
+      id: client.id,
+      amoId: client.amoId,
+      domain: client.domain,
+      adminName: client.adminName,
+      adminEmail: client.adminEmail,
+      adminPhone: client.adminPhone,
+      usersCount: client.usersCount || 0,
+      widgets: (client.widgets || []).map((account) =>
+        this.toAdminAccountRow(account),
+      ),
+    }));
+
+    const knownClientIds = new Set(clientRows.map((client) => client.amoId));
+    for (const account of accounts) {
+      if (knownClientIds.has(account.amoId)) continue;
+      clientRows.push({
+        id: null,
+        amoId: account.amoId,
+        domain: account.domain,
+        adminName: account.adminName,
+        adminEmail: account.adminEmail,
+        adminPhone: account.adminPhone,
+        usersCount: account.usersCount || 0,
+        widgets: [this.toAdminAccountRow(account)],
+      });
+    }
+
+    return clientRows;
+  }
+
+  async getAdminIntegrations() {
+    const integrations = await this.accountsService.findIntegrations();
+    return integrations.map((integration) => ({
+      id: integration.id,
+      widgetName: integration.widgetName,
+      widgetSlug: integration.widgetSlug,
+      widgetCode: integration.widgetCode,
+      amoClientId: integration.amoClientId,
+      redirectUri: integration.redirectUri,
+      isDefault: integration.isDefault,
+      createdAt: this.toIso(integration.createdAt),
+      updatedAt: this.toIso(integration.updatedAt),
+    }));
+  }
+
+  async saveAdminIntegration(payload: {
+    widgetName?: string;
+    widgetSlug?: string;
+    widgetCode?: string;
+    clientId?: string;
+    clientSecret?: string;
+    redirectUri?: string;
+  }) {
+    const saved = await this.accountsService.upsertIntegration({
+      widgetName: String(payload.widgetName || 'Копирование сделок').trim(),
+      widgetSlug: String(payload.widgetSlug || 'copy_leads').trim(),
+      widgetCode: String(payload.widgetCode || '').trim(),
+      amoClientId: String(payload.clientId || '').trim(),
+      amoClientSecret: String(payload.clientSecret || '').trim(),
+      redirectUri: String(
+        payload.redirectUri || this.configService.get<string>('redirectUri') || '',
+      ).trim(),
+    });
+
+    return {
+      id: saved.id,
+      widgetName: saved.widgetName,
+      widgetSlug: saved.widgetSlug,
+      widgetCode: saved.widgetCode,
+      amoClientId: saved.amoClientId,
+      redirectUri: saved.redirectUri,
+    };
+  }
+
+  private toAdminAccountRow(account: Account) {
       const status = this.toPublicLicenseView(account);
       return {
         id: account.id,
         amoId: account.amoId,
         domain: account.domain,
+        widgetName: account.widgetName || account.integration?.widgetName || 'Копирование сделок',
+        widgetSlug: account.widgetSlug || account.integration?.widgetSlug || 'copy_leads',
+        widgetCode: account.widgetCode || account.integration?.widgetCode,
+        amoClientId: account.amoClientId || account.integration?.amoClientId,
         adminName: account.adminName,
         adminEmail: account.adminEmail,
         adminPhone: account.adminPhone,
@@ -519,11 +625,22 @@ export class BillingService {
         installedAt: this.toIso(account.installedAt),
         status,
       };
-    });
   }
 
   async extendByDays(amoId: number, days: number) {
     const account = await this.getAccountOrFail(amoId);
+    return this.extendAccount(account, days);
+  }
+
+  async extendAccountById(accountId: number, days: number) {
+    const account = await this.accountsService.findById(Number(accountId));
+    if (!account) {
+      throw new NotFoundException('Установка виджета не найдена');
+    }
+    return this.extendAccount(account, days);
+  }
+
+  private async extendAccount(account: Account, days: number) {
     const normalizedDays = this.normalizeDays(days);
 
     const now = this.getNow();
@@ -558,37 +675,74 @@ export class BillingService {
   <title>Админка виджета</title>
   <style>
     body{font-family:Arial,sans-serif;background:#f5f7fb;color:#223;margin:0;padding:24px}
+    h1,h2,h3{margin:0 0 12px}
     .card{background:#fff;border:1px solid #d8e0ee;border-radius:12px;padding:16px;margin-bottom:16px}
     .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-    input,button{padding:8px 10px;border-radius:8px;border:1px solid #c8d2e3}
+    .grid{display:grid;grid-template-columns:repeat(3,minmax(220px,1fr));gap:10px}
+    input,button{padding:8px 10px;border-radius:8px;border:1px solid #c8d2e3;font:inherit}
+    input{background:#fff;color:#223}
     button{background:#2f87eb;color:#fff;border-color:#2f87eb;cursor:pointer}
+    button.secondary{background:#eef4ff;color:#24528f;border-color:#c8d8f4}
     table{width:100%;border-collapse:collapse;font-size:13px}
     th,td{border-bottom:1px solid #e7edf7;padding:8px;text-align:left;vertical-align:top}
     .muted{color:#60708a}
+    .pill{display:inline-block;padding:3px 8px;border-radius:999px;background:#eef4ff;color:#24528f;font-size:12px}
+    .widget-row{background:#fbfdff}
+    .client-row{background:#f7faff;font-weight:700}
+    .secret-note{font-size:12px;color:#60708a;margin-top:8px}
+    @media(max-width:900px){.grid{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
   <div class="card">
-    <h2>Клиенты виджета</h2>
+    <h1>Админка виджетов SimpleSales</h1>
     <div class="row">
       <label>Admin token:</label>
       <input id="token" style="min-width:320px" />
-      <button onclick="loadAccounts()">Загрузить</button>
+      <button onclick="loadAll()">Загрузить</button>
       <button onclick="testTelegram()">Проверить Telegram</button>
     </div>
   </div>
 
   <div class="card">
-    <table id="table">
+    <h2>Ключи приватных интеграций</h2>
+    <div class="grid">
+      <input id="widgetName" placeholder="Название виджета" value="Копирование сделок" />
+      <input id="widgetSlug" placeholder="Код продукта" value="copy_leads" />
+      <input id="widgetCode" placeholder="Widget code из amoCRM" />
+      <input id="clientId" placeholder="Client ID из amoCRM" />
+      <input id="clientSecret" placeholder="Client Secret из amoCRM" />
+      <input id="redirectUri" placeholder="Redirect URI" />
+    </div>
+    <div class="row" style="margin-top:10px">
+      <button onclick="saveIntegration()">Сохранить ключи</button>
+      <button class="secondary" onclick="loadIntegrations()">Обновить список</button>
+    </div>
+    <div class="secret-note">Для второй CRM сначала создайте приватную интеграцию в amoCRM, потом внесите сюда client_id, client_secret и widget_code. После этого авторизация будет работать на этом же Railway.</div>
+    <table id="integrationsTable" style="margin-top:14px">
+      <thead>
+        <tr>
+          <th>Виджет</th>
+          <th>Widget code</th>
+          <th>Client ID</th>
+          <th>Redirect URI</th>
+          <th>Обновлено</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Клиенты и установленные виджеты</h2>
+    <table id="clientsTable">
       <thead>
         <tr>
           <th>Account ID</th>
           <th>Домен</th>
-          <th>Статус</th>
-          <th>Срок</th>
           <th>Юзеры</th>
           <th>Админ</th>
-          <th>Продлить</th>
+          <th>Виджеты</th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -603,6 +757,68 @@ export class BillingService {
       return d.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
     }
 
+    function escapeHtml(value){
+      return String(value ?? '').replace(/[&<>"']/g, function(ch){
+        return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[ch];
+      });
+    }
+
+    async function loadAll(){
+      await Promise.all([loadIntegrations(), loadAccounts()]);
+    }
+
+    async function loadIntegrations(){
+      const token = document.getElementById('token').value.trim();
+      const res = await fetch('/billing/admin/integrations', {
+        headers: { 'x-admin-token': token }
+      });
+      if(!res.ok){
+        alert('Ошибка загрузки интеграций: '+res.status);
+        return;
+      }
+      const data = await res.json();
+      const tbody = document.querySelector('#integrationsTable tbody');
+      tbody.innerHTML = '';
+      (data || []).forEach(function(row){
+        const tr = document.createElement('tr');
+        tr.innerHTML =
+          '<td><b>' + escapeHtml(row.widgetName || '-') + '</b><div class="muted">' + escapeHtml(row.widgetSlug || '-') + '</div></td>' +
+          '<td>' + escapeHtml(row.widgetCode || '-') + '</td>' +
+          '<td>' + escapeHtml(row.amoClientId || '-') + '</td>' +
+          '<td>' + escapeHtml(row.redirectUri || '-') + '</td>' +
+          '<td>' + isoToText(row.updatedAt) + '</td>';
+        tbody.appendChild(tr);
+      });
+    }
+
+    async function saveIntegration(){
+      const token = document.getElementById('token').value.trim();
+      const payload = {
+        widgetName: document.getElementById('widgetName').value.trim(),
+        widgetSlug: document.getElementById('widgetSlug').value.trim(),
+        widgetCode: document.getElementById('widgetCode').value.trim(),
+        clientId: document.getElementById('clientId').value.trim(),
+        clientSecret: document.getElementById('clientSecret').value.trim(),
+        redirectUri: document.getElementById('redirectUri').value.trim()
+      };
+      const res = await fetch('/billing/admin/integrations', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-admin-token': token
+        },
+        body: JSON.stringify(payload)
+      });
+      if(!res.ok){
+        const text = await res.text();
+        alert('Ошибка сохранения ключей: ' + text);
+        return;
+      }
+      document.getElementById('clientSecret').value = '';
+      await loadIntegrations();
+      alert('Ключи сохранены');
+    }
+
     async function loadAccounts(){
       const token = document.getElementById('token').value.trim();
       const res = await fetch('/billing/admin/accounts', {
@@ -613,35 +829,49 @@ export class BillingService {
         return;
       }
       const data = await res.json();
-      const tbody = document.querySelector('#table tbody');
+      const tbody = document.querySelector('#clientsTable tbody');
       tbody.innerHTML = '';
-      (data || []).forEach((row)=>{
+      (data || []).forEach(function(row){
         const tr = document.createElement('tr');
+        tr.className = 'client-row';
         tr.innerHTML =
-          '<td>' + (row.amoId ?? '-') + '</td>' +
-          '<td>' + (row.domain || '-') + '</td>' +
-          '<td>' + (row.status?.title || '-') + '</td>' +
-          '<td>' + isoToText(row.status?.expiresAt) + '</td>' +
-          '<td>' + (row.usersCount || 0) + '</td>' +
+          '<td>' + escapeHtml(row.amoId ?? '-') + '</td>' +
+          '<td>' + escapeHtml(row.domain || '-') + '</td>' +
+          '<td>' + escapeHtml(row.usersCount || 0) + '</td>' +
           '<td>' +
-            '<div>' + (row.adminName || '-') + '</div>' +
-            '<div class="muted">' + (row.adminEmail || '-') + '</div>' +
-            '<div class="muted">' + (row.adminPhone || '-') + '</div>' +
+            '<div>' + escapeHtml(row.adminName || '-') + '</div>' +
+            '<div class="muted">' + escapeHtml(row.adminEmail || '-') + '</div>' +
+            '<div class="muted">' + escapeHtml(row.adminPhone || '-') + '</div>' +
           '</td>' +
-          '<td>' +
-            '<div class="row">' +
-              '<input type="number" min="1" value="30" style="width:80px" id="days-' + row.amoId + '" />' +
-              '<button onclick="extend(' + row.amoId + ')">Начислить</button>' +
-            '</div>' +
-          '</td>';
+          '<td><span class="pill">' + escapeHtml((row.widgets || []).length) + '</span></td>';
         tbody.appendChild(tr);
-      })
+
+        (row.widgets || []).forEach(function(widget){
+          const wtr = document.createElement('tr');
+          wtr.className = 'widget-row';
+          wtr.innerHTML =
+            '<td></td>' +
+            '<td><b>' + escapeHtml(widget.widgetName || '-') + '</b><div class="muted">' + escapeHtml(widget.widgetCode || '-') + '</div></td>' +
+            '<td colspan="2">' +
+              '<div>Статус: <b>' + escapeHtml(widget.status?.title || '-') + '</b></div>' +
+              '<div class="muted">Срок: ' + escapeHtml(isoToText(widget.status?.expiresAt)) + '</div>' +
+              '<div class="muted">Установлен: ' + escapeHtml(isoToText(widget.installedAt)) + '</div>' +
+            '</td>' +
+            '<td>' +
+              '<div class="row">' +
+                '<input type="number" min="1" value="30" style="width:80px" id="days-widget-' + widget.id + '" />' +
+                '<button onclick="extendWidget(' + widget.id + ')">Начислить</button>' +
+              '</div>' +
+            '</td>';
+          tbody.appendChild(wtr);
+        });
+      });
     }
 
-    async function extend(amoId){
+    async function extendWidget(accountId){
       const token = document.getElementById('token').value.trim();
-      const days = Number(document.getElementById('days-'+amoId).value || 0);
-      const res = await fetch('/billing/admin/account/'+amoId+'/extend', {
+      const days = Number(document.getElementById('days-widget-'+accountId).value || 0);
+      const res = await fetch('/billing/admin/widget/'+accountId+'/extend', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',

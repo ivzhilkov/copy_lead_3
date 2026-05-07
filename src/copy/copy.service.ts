@@ -251,7 +251,10 @@ export class CopyService {
     const {
       data: { account, leadId, payload },
     } = job;
-    const api = this.accountsService.createConnector(account.amoId);
+    const api = this.accountsService.createConnector(
+      account.amoId,
+      account.widgetCode,
+    );
     api.interceptors.request.use(async (config) => {
       await this.waitForAmoSlot(account.amoId);
       return config;

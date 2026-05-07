@@ -1,14 +1,23 @@
 import { OAuthField } from 'src/interfaces/oauth-field.interface';
 import { normalizeAmoDomain } from 'src/helpers/amo-domain';
 import { encryptedJsonTransformer } from 'src/security/encrypted-json.transformer';
-import { Entity, Column, PrimaryGeneratedColumn, Index } from 'typeorm';
+import {
+  Entity,
+  Column,
+  PrimaryGeneratedColumn,
+  Index,
+  ManyToOne,
+  JoinColumn,
+} from 'typeorm';
+import { CrmClient } from './crm-client.entity';
+import { WidgetIntegration } from './widget-integration.entity';
 
 @Entity()
 export class Account {
   @PrimaryGeneratedColumn()
   id: number;
 
-  @Index('IDX_account_amoId_unique', { unique: true })
+  @Index('IDX_account_amoId')
   @Column()
   amoId: number;
 
@@ -21,6 +30,35 @@ export class Account {
 
   @Column({ type: 'longtext', transformer: encryptedJsonTransformer })
   oauth: OAuthField;
+
+  @Column({ nullable: true })
+  clientAccountId?: number | null;
+
+  @ManyToOne(() => CrmClient, (client) => client.widgets, { nullable: true })
+  @JoinColumn({ name: 'clientAccountId' })
+  client?: CrmClient | null;
+
+  @Column({ nullable: true })
+  integrationId?: number | null;
+
+  @ManyToOne(() => WidgetIntegration, (integration) => integration.accounts, {
+    nullable: true,
+  })
+  @JoinColumn({ name: 'integrationId' })
+  integration?: WidgetIntegration | null;
+
+  @Column({ default: 'copy_leads' })
+  widgetSlug: string;
+
+  @Column({ default: 'Копирование сделок' })
+  widgetName: string;
+
+  @Index('IDX_account_widgetCode')
+  @Column({ nullable: true })
+  widgetCode?: string | null;
+
+  @Column({ nullable: true })
+  amoClientId?: string | null;
 
   @Column({ type: 'datetime', nullable: true })
   installedAt?: Date | null;

@@ -80,6 +80,28 @@ export class BillingController {
     return this.billingService.getAdminAccounts();
   }
 
+  @Get('/admin/integrations')
+  async getAdminIntegrations(@Req() req: Request) {
+    this.billingService.ensureAdminTokenOrThrow(String(req.headers['x-admin-token'] || ''));
+    return this.billingService.getAdminIntegrations();
+  }
+
+  @Post('/admin/integrations')
+  async saveAdminIntegration(
+    @Req() req: Request,
+    @Body() body: {
+      widgetName?: string;
+      widgetSlug?: string;
+      widgetCode?: string;
+      clientId?: string;
+      clientSecret?: string;
+      redirectUri?: string;
+    },
+  ) {
+    this.billingService.ensureAdminTokenOrThrow(String(req.headers['x-admin-token'] || ''));
+    return this.billingService.saveAdminIntegration(body);
+  }
+
   @Get('/admin/test-telegram')
   async testTelegram(@Req() req: Request) {
     this.billingService.ensureAdminTokenOrThrow(String(req.headers['x-admin-token'] || ''));
@@ -94,5 +116,18 @@ export class BillingController {
   ) {
     this.billingService.ensureAdminTokenOrThrow(String(req.headers['x-admin-token'] || ''));
     return this.billingService.extendByDays(Number(amoIdRaw), Number(daysRaw));
+  }
+
+  @Post('/admin/widget/:accountId/extend')
+  async extendWidgetByDays(
+    @Req() req: Request,
+    @Param('accountId') accountIdRaw: string,
+    @Body('days') daysRaw: string | number,
+  ) {
+    this.billingService.ensureAdminTokenOrThrow(String(req.headers['x-admin-token'] || ''));
+    return this.billingService.extendAccountById(
+      Number(accountIdRaw),
+      Number(daysRaw),
+    );
   }
 }

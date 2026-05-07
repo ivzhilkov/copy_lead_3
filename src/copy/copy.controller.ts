@@ -10,7 +10,6 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
 import { AccountsService } from 'src/accounts/accounts.service';
 import { AuthGuard } from 'src/auth/auth.guard';
 import { BillingService } from 'src/billing/billing.service';
@@ -23,7 +22,6 @@ export class CopyController {
   constructor(
     private copyService: CopyService,
     private accountsService: AccountsService,
-    private configService: ConfigService,
     private billingService: BillingService,
   ) {}
 
@@ -61,7 +59,11 @@ export class CopyController {
     @Body('account_id') accountIdRaw: string | number,
     @Body('widget_code') widgetCode: string,
   ) {
-    if (widgetCode !== this.configService.get('widgetCode')) {
+    const integration =
+      await this.accountsService.findIntegrationCredentialsByWidgetCode(
+        widgetCode,
+      );
+    if (!integration) {
       throw new ForbiddenException('Неверный код виджета');
     }
 
@@ -70,7 +72,10 @@ export class CopyController {
       throw new BadRequestException('Некорректный account_id');
     }
 
-    const account = await this.accountsService.findByAmoId(accountId);
+    const account = await this.accountsService.findByAmoId(
+      accountId,
+      integration.widgetCode,
+    );
     if (!account) {
       throw new BadRequestException('Аккаунт интеграции не найден');
     }
