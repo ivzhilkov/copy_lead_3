@@ -696,6 +696,40 @@ export class BillingService {
     };
   }
 
+  async getAdminAmoWidgetInfo(accountId: number) {
+    const account = await this.accountsService.findById(Number(accountId));
+    if (!account) {
+      throw new NotFoundException('Установка виджета не найдена');
+    }
+
+    const widgetCode = String(account.widgetCode || '').trim();
+    if (!widgetCode) {
+      throw new BadRequestException('У установки не задан widgetCode');
+    }
+
+    const api = this.accountsService.createConnector(account.amoId, widgetCode);
+    const response = await api.get(`/api/v4/widgets/${widgetCode}`);
+    const widget = response.data || {};
+
+    return {
+      account: {
+        id: account.id,
+        amoId: account.amoId,
+        domain: account.domain,
+        widgetCode,
+      },
+      widget: {
+        id: widget.id,
+        code: widget.code,
+        version: widget.version,
+        is_work_with_dp: widget.is_work_with_dp,
+        locations: widget.locations,
+        name: widget.name,
+      },
+      raw: widget,
+    };
+  }
+
   private toAdminAccountRow(account: Account) {
       const status = this.toPublicLicenseView(account);
       return {

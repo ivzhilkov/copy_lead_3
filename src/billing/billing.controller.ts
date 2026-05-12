@@ -86,6 +86,15 @@ export class BillingController {
     return this.billingService.getAdminIntegrations();
   }
 
+  @Get('/admin/widget/:accountId/amo-info')
+  async getAdminAmoWidgetInfo(
+    @Req() req: Request,
+    @Param('accountId') accountIdRaw: string,
+  ) {
+    this.billingService.ensureAdminTokenOrThrow(String(req.headers['x-admin-token'] || ''));
+    return this.billingService.getAdminAmoWidgetInfo(Number(accountIdRaw));
+  }
+
   @Post('/admin/integrations')
   async saveAdminIntegration(
     @Req() req: Request,
