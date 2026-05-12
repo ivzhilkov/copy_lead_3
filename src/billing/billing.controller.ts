@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Header,
   Param,
@@ -109,6 +110,15 @@ export class BillingController {
   ) {
     this.billingService.ensureAdminTokenOrThrow(String(req.headers['x-admin-token'] || ''));
     return this.billingService.saveAdminIntegration(body);
+  }
+
+  @Delete('/admin/integrations/:widgetCode')
+  async deleteAdminIntegration(
+    @Req() req: Request,
+    @Param('widgetCode') widgetCode: string,
+  ) {
+    this.billingService.ensureAdminTokenOrThrow(String(req.headers['x-admin-token'] || ''));
+    return this.billingService.deleteAdminIntegration(widgetCode);
   }
 
   @Get('/admin/test-telegram')

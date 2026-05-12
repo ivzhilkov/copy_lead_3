@@ -696,6 +696,10 @@ export class BillingService {
     };
   }
 
+  async deleteAdminIntegration(widgetCode: string) {
+    return this.accountsService.deleteIntegrationCompletelyByWidgetCode(widgetCode);
+  }
+
   async getAdminAmoWidgetInfo(accountId: number) {
     const account = await this.accountsService.findById(Number(accountId));
     if (!account) {

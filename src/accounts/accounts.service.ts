@@ -199,6 +199,48 @@ export class AccountsService {
     });
   }
 
+  async deleteIntegrationCompletelyByWidgetCode(widgetCode: string) {
+    const normalizedWidgetCode = String(widgetCode || '').trim();
+    if (!normalizedWidgetCode) {
+      throw new Error('Нужно передать widgetCode');
+    }
+
+    const integration = await this.findIntegrationByWidgetCode(normalizedWidgetCode);
+    const accounts = await this.accountsRepo.find({
+      where: { widgetCode: normalizedWidgetCode },
+    } as any);
+    const clientIds = Array.from(
+      new Set(
+        accounts
+          .map((account) => account.clientAccountId)
+          .filter((id): id is number => id !== null && id !== undefined),
+      ),
+    );
+
+    await this.accountsRepo.delete({ widgetCode: normalizedWidgetCode } as any);
+    if (integration) {
+      await this.integrationsRepo.delete(integration.id);
+    }
+
+    let removedClients = 0;
+    for (const clientId of clientIds) {
+      const widgetsLeft = await this.accountsRepo.count({
+        where: { clientAccountId: clientId },
+      } as any);
+      if (widgetsLeft === 0) {
+        await this.clientsRepo.delete(clientId);
+        removedClients += 1;
+      }
+    }
+
+    return {
+      widgetCode: normalizedWidgetCode,
+      removedAccounts: accounts.length,
+      removedIntegration: Boolean(integration),
+      removedClients,
+    };
+  }
+
   create(data: Partial<Account>): Promise<Account> {
     return this.accountsRepo.save(data);
   }
