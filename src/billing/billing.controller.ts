@@ -121,6 +121,15 @@ export class BillingController {
     return this.billingService.deleteAdminIntegration(widgetCode);
   }
 
+  @Delete('/admin/clients/:amoIdOrDomain/installations')
+  async deleteAdminClientInstallations(
+    @Req() req: Request,
+    @Param('amoIdOrDomain') amoIdOrDomain: string,
+  ) {
+    this.billingService.ensureAdminTokenOrThrow(String(req.headers['x-admin-token'] || ''));
+    return this.billingService.deleteAdminClientInstallations(amoIdOrDomain);
+  }
+
   @Get('/admin/test-telegram')
   async testTelegram(@Req() req: Request) {
     this.billingService.ensureAdminTokenOrThrow(String(req.headers['x-admin-token'] || ''));

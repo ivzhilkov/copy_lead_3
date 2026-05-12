@@ -241,6 +241,53 @@ export class AccountsService {
     };
   }
 
+  async deleteClientInstallations(amoIdOrDomain: string | number) {
+    const raw = String(amoIdOrDomain || '').trim();
+    if (!raw) {
+      throw new Error('Нужно передать amoId или домен клиента');
+    }
+
+    const normalizedAmoId = Number(raw);
+    const byAmoId = Number.isFinite(normalizedAmoId) && normalizedAmoId > 0;
+    const normalizedDomain = byAmoId ? null : normalizeAmoDomain(raw);
+    const where = byAmoId
+      ? { amoId: normalizedAmoId }
+      : { domain: normalizedDomain };
+
+    const accounts = await this.accountsRepo.find({ where } as any);
+    const clientIds = Array.from(
+      new Set(
+        accounts
+          .map((account) => account.clientAccountId)
+          .filter((id): id is number => id !== null && id !== undefined),
+      ),
+    );
+    const widgetCodes = accounts
+      .map((account) => account.widgetCode)
+      .filter(Boolean);
+
+    await this.accountsRepo.delete(where as any);
+
+    let removedClients = 0;
+    for (const clientId of clientIds) {
+      const widgetsLeft = await this.accountsRepo.count({
+        where: { clientAccountId: clientId },
+      } as any);
+      if (widgetsLeft === 0) {
+        await this.clientsRepo.delete(clientId);
+        removedClients += 1;
+      }
+    }
+
+    return {
+      target: raw,
+      removedAccounts: accounts.length,
+      removedClients,
+      keptIntegrations: true,
+      widgetCodes,
+    };
+  }
+
   create(data: Partial<Account>): Promise<Account> {
     return this.accountsRepo.save(data);
   }

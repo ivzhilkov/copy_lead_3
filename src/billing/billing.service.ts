@@ -700,6 +700,10 @@ export class BillingService {
     return this.accountsService.deleteIntegrationCompletelyByWidgetCode(widgetCode);
   }
 
+  async deleteAdminClientInstallations(amoIdOrDomain: string) {
+    return this.accountsService.deleteClientInstallations(amoIdOrDomain);
+  }
+
   async getAdminAmoWidgetInfo(accountId: number) {
     const account = await this.accountsService.findById(Number(accountId));
     if (!account) {
