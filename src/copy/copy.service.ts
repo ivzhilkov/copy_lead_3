@@ -311,9 +311,6 @@ export class CopyService {
             if (Object.prototype.hasOwnProperty.call(value, 'enum_id')) {
               mapped.enum_id = value.enum_id;
             }
-            if (Object.prototype.hasOwnProperty.call(value, 'enum_code')) {
-              mapped.enum_code = value.enum_code;
-            }
             if (Object.prototype.hasOwnProperty.call(value, 'currency')) {
               mapped.currency = value.currency;
             }
