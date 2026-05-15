@@ -37,6 +37,19 @@ export class BillingController {
     return this.billingService.getPublicStatus(Number(accountIdRaw), widgetCode);
   }
 
+  @Post('/public/copy-attempt')
+  async copyAttempt(
+    @Body('account_id') accountIdRaw: string | number,
+    @Body('widget_code') widgetCode: string,
+    @Body('profile') profile: any,
+  ) {
+    return this.billingService.trackCopyAttempt({
+      accountId: Number(accountIdRaw),
+      widgetCode,
+      profile,
+    });
+  }
+
   @Post('/public/activate-trial')
   async activateTrial(
     @Body('account_id') accountIdRaw: string | number,

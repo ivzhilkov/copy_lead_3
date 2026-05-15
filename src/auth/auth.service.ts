@@ -54,6 +54,7 @@ export class AuthService {
         amoClientId: credentials.amoClientId,
         installedAt: new Date(),
         lastSeenAt: new Date(),
+        firstSeenSource: 'oauth_callback',
       });
     } else {
       await this.accountService.update(account.id, {
@@ -66,6 +67,7 @@ export class AuthService {
         widgetCode: credentials.widgetCode,
         amoClientId: credentials.amoClientId,
         lastSeenAt: new Date(),
+        firstSeenSource: account.firstSeenSource || 'oauth_callback',
       });
     }
     return `https://${domain}`;

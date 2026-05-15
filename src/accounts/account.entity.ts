@@ -66,6 +66,12 @@ export class Account {
   @Column({ type: 'datetime', nullable: true })
   installNotifiedAt?: Date | null;
 
+  @Column({ type: 'boolean', default: false })
+  isLegacy: boolean;
+
+  @Column({ nullable: true })
+  firstSeenSource?: string | null;
+
   @Column({ nullable: true })
   adminName?: string | null;
 

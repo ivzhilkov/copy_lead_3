@@ -14,9 +14,11 @@ import { normalizeAmoDomain } from 'src/helpers/amo-domain';
 
 export type LicenseState =
   | 'not_activated'
+  | 'legacy_not_activated'
   | 'trial'
   | 'paid'
   | 'grace'
+  | 'paid_expired'
   | 'expired';
 
 export type PublicProfilePayload = {
@@ -26,9 +28,17 @@ export type PublicProfilePayload = {
   userName?: string;
   userId?: number;
   usersCount?: number;
+  isAmoAdmin?: boolean;
+  userRank?: string;
 };
 
 type InstallPayload = {
+  accountId: number;
+  widgetCode: string;
+  profile?: PublicProfilePayload;
+};
+
+type CopyAttemptPayload = {
   accountId: number;
   widgetCode: string;
   profile?: PublicProfilePayload;
@@ -61,6 +71,8 @@ type LicenseView = {
   paidUntil: string | null;
   graceExtendedUntil: string | null;
   graceExtensionUsed: boolean;
+  isLegacy: boolean;
+  firstSeenSource: string | null;
 };
 
 @Injectable()
@@ -113,7 +125,16 @@ export class BillingService {
       usersCount: Number.isFinite(Number(profile?.usersCount))
         ? Number(profile?.usersCount)
         : 0,
+      isAmoAdmin: this.toBoolean(profile?.isAmoAdmin),
+      userRank: this.safeString(profile?.userRank),
     };
+  }
+
+  private toBoolean(value: unknown) {
+    if (value === true) return true;
+    if (value === false) return false;
+    const normalized = String(value || '').trim().toLowerCase();
+    return ['1', 'true', 'yes', 'y', 'admin'].includes(normalized);
   }
 
   private calculateState(account: Account) {
@@ -132,6 +153,13 @@ export class BillingService {
       return {
         state: 'paid' as LicenseState,
         expiresAt: account.paidUntil,
+      };
+    }
+
+    if (paidUntil && paidUntil <= now) {
+      return {
+        state: 'paid_expired' as LicenseState,
+        expiresAt: null,
       };
     }
 
@@ -157,7 +185,9 @@ export class BillingService {
     }
 
     return {
-      state: 'not_activated' as LicenseState,
+      state: account?.isLegacy
+        ? ('legacy_not_activated' as LicenseState)
+        : ('not_activated' as LicenseState),
       expiresAt: null,
     };
   }
@@ -178,6 +208,8 @@ export class BillingService {
         paidUntil: this.toIso(account?.paidUntil),
         graceExtendedUntil: this.toIso(account?.graceExtendedUntil),
         graceExtensionUsed: Boolean(account?.graceExtensionUsed),
+        isLegacy: Boolean(account?.isLegacy),
+        firstSeenSource: account?.firstSeenSource || null,
       };
     }
 
@@ -194,6 +226,8 @@ export class BillingService {
         paidUntil: this.toIso(account?.paidUntil),
         graceExtendedUntil: this.toIso(account?.graceExtendedUntil),
         graceExtensionUsed: Boolean(account?.graceExtensionUsed),
+        isLegacy: Boolean(account?.isLegacy),
+        firstSeenSource: account?.firstSeenSource || null,
       };
     }
 
@@ -210,14 +244,16 @@ export class BillingService {
         paidUntil: this.toIso(account?.paidUntil),
         graceExtendedUntil: this.toIso(account?.graceExtendedUntil),
         graceExtensionUsed: Boolean(account?.graceExtensionUsed),
+        isLegacy: Boolean(account?.isLegacy),
+        firstSeenSource: account?.firstSeenSource || null,
       };
     }
 
-    if (state === 'expired') {
+    if (state === 'paid_expired') {
       return {
         state,
-        title: 'Пробный период закончился',
-        message: 'Пробный период закончился. Нажмите «Оплатить», чтобы запросить продление.',
+        title: 'Платный период закончился',
+        message: 'Платный период закончился. Администратор аккаунта может продлить доступ в разделе оплаты.',
         expiresAt: null,
         isExpired: true,
         canCopy: false,
@@ -226,13 +262,35 @@ export class BillingService {
         paidUntil: this.toIso(account?.paidUntil),
         graceExtendedUntil: this.toIso(account?.graceExtendedUntil),
         graceExtensionUsed: Boolean(account?.graceExtensionUsed),
+        isLegacy: Boolean(account?.isLegacy),
+        firstSeenSource: account?.firstSeenSource || null,
+      };
+    }
+
+    if (state === 'expired') {
+      return {
+        state,
+        title: 'Пробный период закончился',
+        message: 'Пробный период закончился. Администратор аккаунта может запросить оплату или обсудить продление с менеджером.',
+        expiresAt: null,
+        isExpired: true,
+        canCopy: false,
+        trialActivated: Boolean(account?.trialActivatedAt),
+        trialEndsAt: this.toIso(account?.trialEndsAt),
+        paidUntil: this.toIso(account?.paidUntil),
+        graceExtendedUntil: this.toIso(account?.graceExtendedUntil),
+        graceExtensionUsed: Boolean(account?.graceExtensionUsed),
+        isLegacy: Boolean(account?.isLegacy),
+        firstSeenSource: account?.firstSeenSource || null,
       };
     }
 
     return {
-      state: 'not_activated',
-      title: 'Пробный период не активирован',
-      message: 'Введите email и телефон и нажмите «Активировать пробный период».',
+      state,
+      title: account?.isLegacy ? 'Виджет обновился' : 'Пробный период не активирован',
+      message: account?.isLegacy
+        ? 'Мы добавили новые функции и перевели виджет на платную модель. Для текущих пользователей доступен пробный период 7 дней.'
+        : 'Администратор аккаунта может активировать пробный период на 7 дней в настройках виджета.',
       expiresAt: null,
       isExpired: true,
       canCopy: false,
@@ -241,6 +299,8 @@ export class BillingService {
       paidUntil: this.toIso(account?.paidUntil),
       graceExtendedUntil: this.toIso(account?.graceExtendedUntil),
       graceExtensionUsed: Boolean(account?.graceExtensionUsed),
+      isLegacy: Boolean(account?.isLegacy),
+      firstSeenSource: account?.firstSeenSource || null,
     };
   }
 
@@ -249,7 +309,7 @@ export class BillingService {
       state: 'not_activated',
       title: 'Требуется авторизация',
       message:
-        'Интеграция еще не получила доступ к amoCRM. Откройте виджет после завершения установки.',
+        'Интеграция еще не получила доступ к amoCRM. Завершите установку и откройте настройки виджета.',
       expiresAt: null,
       isExpired: true,
       canCopy: false,
@@ -258,6 +318,8 @@ export class BillingService {
       paidUntil: null,
       graceExtendedUntil: null,
       graceExtensionUsed: false,
+      isLegacy: false,
+      firstSeenSource: null,
     };
   }
 
@@ -379,6 +441,44 @@ export class BillingService {
     return saved;
   }
 
+  private async ensureAmoAdminOrThrow(
+    account: Account,
+    profile?: PublicProfilePayload,
+  ) {
+    const normalized = this.serializeProfile(profile);
+    if (normalized.isAmoAdmin || normalized.userRank === 'master') return;
+
+    if (normalized.userId) {
+      try {
+        const api = this.accountsService.createConnector(
+          account.amoId,
+          account.widgetCode || undefined,
+        );
+        const response = await api.get(`/api/v4/users/${normalized.userId}`, {
+          params: { with: 'role,group' },
+        });
+        const user = response.data || {};
+        const rights = user.rights || {};
+        if (
+          rights.is_admin === true ||
+          user.is_admin === true ||
+          user.user_rank === 'master' ||
+          user.role?.type === 'admin'
+        ) {
+          return;
+        }
+      } catch (e) {
+        this.logger.warn(
+          `Не удалось проверить права пользователя ${normalized.userId} в amoCRM: ${(e as Error)?.message || e}`,
+        );
+      }
+    }
+
+    throw new ForbiddenException(
+      'Активировать пробный период может только администратор аккаунта amoCRM',
+    );
+  }
+
   private getDomain(account: Account, profile?: PublicProfilePayload) {
     return normalizeAmoDomain(profile?.domain || account.domain);
   }
@@ -410,7 +510,12 @@ export class BillingService {
       return this.toPendingAccountView();
     }
 
-    const updated = await this.upsertProfile(account, payload.profile);
+    let updated = await this.upsertProfile(account, payload.profile);
+    if (!updated.firstSeenSource) {
+      updated = await this.accountsService.update(updated.id, {
+        firstSeenSource: 'settings',
+      });
+    }
 
     if (!updated.installNotifiedAt) {
       const normalized = this.serializeProfile(payload.profile);
@@ -439,6 +544,38 @@ export class BillingService {
     return this.toPublicLicenseView(updated);
   }
 
+  async trackCopyAttempt(payload: CopyAttemptPayload) {
+    const account = await this.getAccountOrNull(
+      payload.accountId,
+      payload.widgetCode,
+    );
+
+    if (!account) {
+      await this.upsertPendingClient(payload.accountId, payload.profile);
+      return this.toPendingAccountView();
+    }
+
+    let updated = await this.upsertProfile(account, payload.profile);
+    const shouldMarkLegacy =
+      !updated.firstSeenSource &&
+      !updated.trialActivatedAt &&
+      !updated.trialEndsAt &&
+      !updated.paidUntil;
+
+    if (shouldMarkLegacy) {
+      updated = await this.accountsService.update(updated.id, {
+        isLegacy: true,
+        firstSeenSource: 'manual_copy',
+      });
+    } else if (!updated.firstSeenSource) {
+      updated = await this.accountsService.update(updated.id, {
+        firstSeenSource: 'manual_copy',
+      });
+    }
+
+    return this.toPublicLicenseView(updated);
+  }
+
   async getPublicStatus(accountId: number, widgetCode: string) {
     const account = await this.getAccountOrNull(accountId, widgetCode);
     if (!account) return this.toPendingAccountView();
@@ -455,14 +592,23 @@ export class BillingService {
       return this.toPendingAccountView();
     }
     const profileUpdated = await this.upsertProfile(account, payload.profile);
+    await this.ensureAmoAdminOrThrow(profileUpdated, payload.profile);
 
     const { state } = this.calculateState(profileUpdated);
     if (state === 'paid' || state === 'trial' || state === 'grace') {
       return this.toPublicLicenseView(profileUpdated);
     }
+    if (
+      profileUpdated.trialActivatedAt ||
+      profileUpdated.trialEndsAt ||
+      profileUpdated.graceExtensionUsed ||
+      profileUpdated.paidUntil
+    ) {
+      return this.toPublicLicenseView(profileUpdated);
+    }
 
     const now = this.getNow();
-    const trialEndsAt = new Date(now.getTime() + 3 * 24 * 60 * 60 * 1000);
+    const trialEndsAt = new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
     const normalized = this.serializeProfile(payload.profile);
 
     const saved = await this.accountsService.update(profileUpdated.id, {
@@ -510,6 +656,7 @@ export class BillingService {
       };
     }
     const profileUpdated = await this.upsertProfile(account, payload.profile);
+    await this.ensureAmoAdminOrThrow(profileUpdated, payload.profile);
     const statusBefore = this.toPublicLicenseView(profileUpdated);
 
     const normalized = this.serializeProfile(payload.profile);
@@ -588,9 +735,12 @@ export class BillingService {
 
     throw new ForbiddenException({
       code: 'billing_expired',
-      message: status.state === 'not_activated'
-        ? 'Пробный период не активирован'
-        : 'Пробный период закончился',
+      message:
+        status.state === 'not_activated' || status.state === 'legacy_not_activated'
+          ? 'Пробный период не активирован'
+          : status.state === 'paid_expired'
+            ? 'Платный период закончился'
+            : 'Пробный период закончился',
       status,
     });
   }
@@ -753,6 +903,8 @@ export class BillingService {
         adminPhone: account.adminPhone,
         usersCount: account.usersCount || 0,
         installedAt: this.toIso(account.installedAt),
+        isLegacy: Boolean(account.isLegacy),
+        firstSeenSource: account.firstSeenSource || null,
         status,
       };
   }
@@ -986,6 +1138,7 @@ export class BillingService {
               '<div>Статус: <b>' + escapeHtml(widget.status?.title || '-') + '</b></div>' +
               '<div class="muted">Срок: ' + escapeHtml(isoToText(widget.status?.expiresAt)) + '</div>' +
               '<div class="muted">Установлен: ' + escapeHtml(isoToText(widget.installedAt)) + '</div>' +
+              '<div class="muted">Legacy: ' + (widget.isLegacy ? 'да' : 'нет') + '; источник: ' + escapeHtml(widget.firstSeenSource || '-') + '</div>' +
             '</td>' +
             '<td>' +
               '<div class="row">' +
