@@ -259,6 +259,9 @@ export class AccountsService {
     const where = byAmoId
       ? { amoId: normalizedAmoId }
       : { domain: normalizedDomain };
+    const client = await this.clientsRepo.findOne({
+      where,
+    } as any);
 
     const accounts = await this.accountsRepo.find({ where } as any);
     const clientIds = Array.from(
@@ -268,6 +271,9 @@ export class AccountsService {
           .filter((id): id is number => id !== null && id !== undefined),
       ),
     );
+    if (client?.id && !clientIds.includes(client.id)) {
+      clientIds.push(client.id);
+    }
     const widgetCodes = accounts
       .map((account) => account.widgetCode)
       .filter(Boolean);
