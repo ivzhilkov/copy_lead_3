@@ -5,6 +5,7 @@ import {
   Get,
   Header,
   Param,
+  Patch,
   Post,
   Query,
   Req,
@@ -203,5 +204,27 @@ export class BillingController {
       Number(accountIdRaw),
       Number(daysRaw),
     );
+  }
+
+  @Patch('/admin/widget/:accountId/license')
+  async updateWidgetLicense(
+    @Req() req: Request,
+    @Param('accountId') accountIdRaw: string,
+    @Body() body: {
+      status?: any;
+      paidUntil?: string | null;
+    },
+  ) {
+    await this.ensureAdmin(req);
+    return this.billingService.updateAdminWidgetLicense(Number(accountIdRaw), body);
+  }
+
+  @Delete('/admin/widget/:accountId')
+  async deleteWidgetInstallation(
+    @Req() req: Request,
+    @Param('accountId') accountIdRaw: string,
+  ) {
+    await this.ensureAdmin(req);
+    return this.billingService.deleteAdminWidgetInstallation(Number(accountIdRaw));
   }
 }

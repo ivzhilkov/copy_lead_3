@@ -294,6 +294,44 @@ export class AccountsService {
     };
   }
 
+  async deleteAccountInstallation(accountId: number) {
+    const id = Number(accountId);
+    if (!Number.isFinite(id) || id <= 0) {
+      throw new Error('Нужно передать ID установки');
+    }
+
+    const account = await this.findById(id);
+    if (!account) {
+      return {
+        accountId: id,
+        removedAccount: false,
+        removedClient: false,
+      };
+    }
+
+    const clientId = account.clientAccountId;
+    await this.accountsRepo.delete(id);
+
+    let removedClient = false;
+    if (clientId) {
+      const widgetsLeft = await this.accountsRepo.count({
+        where: { clientAccountId: clientId },
+      } as any);
+      if (widgetsLeft === 0) {
+        await this.clientsRepo.delete(clientId);
+        removedClient = true;
+      }
+    }
+
+    return {
+      accountId: id,
+      amoId: account.amoId,
+      domain: account.domain,
+      removedAccount: true,
+      removedClient,
+    };
+  }
+
   create(data: Partial<Account>): Promise<Account> {
     return this.accountsRepo.save(data);
   }

@@ -89,9 +89,15 @@ type LicenseView = {
   firstSeenSource: string | null;
 };
 
+type PaidLicensesCacheEntry = {
+  value: number | null;
+  expiresAt: number;
+};
+
 @Injectable()
 export class BillingService {
   private readonly logger = new Logger(BillingService.name);
+  private readonly paidLicensesCache = new Map<number, PaidLicensesCacheEntry>();
 
   constructor(
     private readonly accountsService: AccountsService,
@@ -941,17 +947,49 @@ export class BillingService {
 
   private isPaidAmoLicenseUser(user: any) {
     const rights = user?.rights || {};
+    const explicitInactive =
+      user?.is_active === false ||
+      user?.active === false ||
+      user?.isActive === false ||
+      user?.is_deleted === true ||
+      user?.isDeleted === true ||
+      rights?.is_active === false ||
+      rights?.active === false ||
+      rights?.isActive === false;
     const explicitFree =
       user?.is_free === true ||
       user?.isFree === true ||
       rights?.is_free === true ||
       rights?.isFree === true;
     const botType = String(user?.type || user?.user_type || '').toLowerCase();
-    return !explicitFree && botType !== 'bot';
+    return !explicitInactive && !explicitFree && botType !== 'bot';
+  }
+
+  private async mapWithConcurrency<T, R>(
+    items: T[],
+    limit: number,
+    mapper: (item: T, index: number) => Promise<R>,
+  ) {
+    const results = new Array<R>(items.length);
+    let cursor = 0;
+    const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+      while (cursor < items.length) {
+        const index = cursor;
+        cursor += 1;
+        results[index] = await mapper(items[index], index);
+      }
+    });
+    await Promise.all(workers);
+    return results;
   }
 
   private async getCurrentAmoPaidLicensesCount(account?: Account | null) {
     if (!account) return null;
+    const cached = this.paidLicensesCache.get(account.amoId);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.value;
+    }
+
     try {
       const api = this.accountsService.createConnector(
         account.amoId,
@@ -970,13 +1008,22 @@ export class BillingService {
         users.push(...pageUsers);
         if (pageUsers.length < 250) break;
       }
-      return users.filter((user) => this.isPaidAmoLicenseUser(user)).length;
+      const count = users.filter((user) => this.isPaidAmoLicenseUser(user)).length;
+      this.paidLicensesCache.set(account.amoId, {
+        value: count,
+        expiresAt: Date.now() + 5 * 60 * 1000,
+      });
+      return count;
     } catch (e) {
       this.logger.warn(
         `Не удалось получить текущие лицензии amoCRM для ${account.amoId}: ${
           e?.response?.status || e?.message || e
         }`,
       );
+      this.paidLicensesCache.set(account.amoId, {
+        value: null,
+        expiresAt: Date.now() + 60 * 1000,
+      });
       return null;
     }
   }
@@ -984,13 +1031,11 @@ export class BillingService {
   async getAdminAccounts() {
     const clients = await this.accountsService.findAllClients();
     const accounts = await this.accountsService.findAll();
-    const clientRows = [];
-
-    for (const client of clients) {
+    const clientRows = await this.mapWithConcurrency(clients, 5, async (client) => {
       const widgets = client.widgets || [];
       const liveUsersCount = await this.getCurrentAmoPaidLicensesCount(widgets[0]);
       const paidLicensesCount = liveUsersCount ?? (client.usersCount || 0);
-      clientRows.push({
+      return {
         id: client.id,
         amoId: client.amoId,
         crm: this.getCrmKind(),
@@ -1001,17 +1046,17 @@ export class BillingService {
         adminPhone: client.adminPhone,
         paidLicensesCount,
         usersCount: paidLicensesCount,
-        usersCountSource: liveUsersCount === null ? 'stored' : 'amo_paid',
+        usersCountSource: liveUsersCount === null ? 'stored' : 'amo_paid_active',
         widgets: widgets.map((account) => this.toAdminAccountRow(account)),
-      });
-    }
+      };
+    });
 
     const knownClientIds = new Set(clientRows.map((client) => client.amoId));
-    for (const account of accounts) {
-      if (knownClientIds.has(account.amoId)) continue;
+    const orphanAccounts = accounts.filter((account) => !knownClientIds.has(account.amoId));
+    const orphanRows = await this.mapWithConcurrency(orphanAccounts, 5, async (account) => {
       const liveUsersCount = await this.getCurrentAmoPaidLicensesCount(account);
       const paidLicensesCount = liveUsersCount ?? (account.usersCount || 0);
-      clientRows.push({
+      return {
         id: null,
         amoId: account.amoId,
         crm: this.getCrmKind(),
@@ -1022,12 +1067,12 @@ export class BillingService {
         adminPhone: account.adminPhone,
         paidLicensesCount,
         usersCount: paidLicensesCount,
-        usersCountSource: liveUsersCount === null ? 'stored' : 'amo_paid',
+        usersCountSource: liveUsersCount === null ? 'stored' : 'amo_paid_active',
         widgets: [this.toAdminAccountRow(account)],
-      });
-    }
+      };
+    });
 
-    return clientRows;
+    return [...clientRows, ...orphanRows];
   }
 
   async getAdminIntegrations() {
@@ -1084,6 +1129,10 @@ export class BillingService {
 
   async deleteAdminClientInstallations(amoIdOrDomain: string) {
     return this.accountsService.deleteClientInstallations(amoIdOrDomain);
+  }
+
+  async deleteAdminWidgetInstallation(accountId: number) {
+    return this.accountsService.deleteAccountInstallation(accountId);
   }
 
   async getAdminAmoWidgetInfo(accountId: number) {
@@ -1157,6 +1206,96 @@ export class BillingService {
     return this.extendAccount(account, days);
   }
 
+  async updateAdminWidgetLicense(
+    accountId: number,
+    payload: {
+      status?: LicenseState;
+      paidUntil?: string | null;
+    },
+  ) {
+    const account = await this.accountsService.findById(Number(accountId));
+    if (!account) {
+      throw new NotFoundException('Установка виджета не найдена');
+    }
+
+    const status = String(payload?.status || '').trim() as LicenseState | '';
+    const rawPaidUntil = String(payload?.paidUntil || '').trim();
+    const updates: Partial<Account> = {};
+    let manualDate: Date | null = null;
+
+    if (rawPaidUntil) {
+      const paidUntil = new Date(`${rawPaidUntil}T23:59:59+03:00`);
+      if (!Number.isFinite(paidUntil.getTime())) {
+        throw new BadRequestException('Некорректная дата окончания');
+      }
+      manualDate = paidUntil;
+      updates.paidUntil = paidUntil;
+      updates.trialEndsAt = null;
+      updates.graceExtendedUntil = null;
+    }
+
+    if (status) {
+      const now = this.getNow();
+      const yesterday = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+      const defaultPaidUntil =
+        updates.paidUntil ||
+        account.paidUntil ||
+        new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+
+      if (status === 'paid') {
+        updates.paidUntil = manualDate
+          ? manualDate
+          : new Date(defaultPaidUntil).getTime() > now.getTime()
+            ? new Date(defaultPaidUntil)
+            : new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
+        updates.trialEndsAt = null;
+        updates.graceExtendedUntil = null;
+      } else if (status === 'paid_expired') {
+        updates.paidUntil =
+          rawPaidUntil && updates.paidUntil ? updates.paidUntil : yesterday;
+        updates.trialEndsAt = null;
+        updates.graceExtendedUntil = null;
+      } else if (status === 'trial') {
+        updates.paidUntil = null;
+        updates.trialActivatedAt = account.trialActivatedAt || now;
+        updates.trialEndsAt =
+          manualDate || new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
+        updates.graceExtendedUntil = null;
+      } else if (status === 'expired') {
+        updates.paidUntil = null;
+        updates.trialActivatedAt = account.trialActivatedAt || yesterday;
+        updates.trialEndsAt = yesterday;
+        updates.graceExtendedUntil = null;
+      } else if (status === 'grace') {
+        updates.graceExtendedUntil =
+          manualDate || new Date(now.getTime() + 24 * 60 * 60 * 1000);
+        updates.paidUntil = null;
+      } else if (status === 'not_activated' || status === 'legacy_not_activated') {
+        updates.paidUntil = null;
+        updates.trialActivatedAt = null;
+        updates.trialEndsAt = null;
+        updates.graceExtendedUntil = null;
+        updates.graceExtensionUsed = false;
+        updates.isLegacy = status === 'legacy_not_activated';
+      } else {
+        throw new BadRequestException('Некорректный статус');
+      }
+    }
+
+    if (!Object.keys(updates).length) {
+      throw new BadRequestException('Нужно передать статус или дату');
+    }
+
+    const updated = await this.accountsService.update(account.id, updates);
+    return {
+      amoId: updated.amoId,
+      paidUntil: this.toIso(updated.paidUntil),
+      trialEndsAt: this.toIso(updated.trialEndsAt),
+      graceExtendedUntil: this.toIso(updated.graceExtendedUntil),
+      status: this.toPublicLicenseView(updated),
+    };
+  }
+
   private async extendAccount(account: Account, days: number) {
     const normalizedDays = this.normalizeDays(days);
 
@@ -1201,6 +1340,8 @@ export class BillingService {
     button:disabled{opacity:.52;cursor:not-allowed;box-shadow:none;transform:none}
     button.secondary{background:#fff;color:var(--text);border-color:var(--line)}
     button.secondary:hover{background:var(--surface-soft);box-shadow:none}
+    button.danger{background:#fff;color:var(--red);border-color:#fecaca}
+    button.danger:hover{background:var(--red-bg);box-shadow:none}
     input,select{width:100%;min-height:38px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--text);padding:8px 10px;outline:none}
     input:focus,select:focus{border-color:#93c5fd;box-shadow:0 0 0 4px rgba(37,99,235,.12)}
     label{display:block;margin:0 0 6px;color:var(--muted);font-size:12px;font-weight:700}
@@ -1214,11 +1355,12 @@ export class BillingService {
     .toolbar{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
     .panel{background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);margin-bottom:14px}
     .panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:16px;border-bottom:1px solid var(--line)}
-    .kpis{display:grid;grid-template-columns:repeat(4,minmax(160px,1fr));gap:10px;margin-bottom:14px}
-    .kpi{background:#fff;border:1px solid var(--line);border-radius:12px;padding:13px;text-align:left;color:var(--text);box-shadow:none;min-height:84px;align-items:flex-start}
+    .kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:14px;align-items:stretch}
+    .kpi{display:block;background:#fff;border:1px solid var(--line);border-radius:14px;padding:14px 15px;text-align:left;color:var(--text);box-shadow:0 8px 22px rgba(17,24,39,.04);min-height:96px}
     .kpi:hover{border-color:#bfdbfe;background:#fbfdff;box-shadow:none}
-    .kpi span{display:block;color:var(--muted);font-size:12px;font-weight:700}
-    .kpi strong{display:block;margin-top:7px;font-size:26px;line-height:1}
+    .kpi span{display:block;min-height:32px;color:var(--muted);font-size:12px;font-weight:800;line-height:1.3}
+    .kpi strong{display:block;margin-top:8px;font-size:28px;line-height:1}
+    .kpi small{display:block;margin-top:6px;color:var(--muted-2);font-size:11px;font-weight:650}
     .searchbar{display:flex;gap:10px;align-items:center;min-width:min(520px,100%)}
     .searchbar input{min-width:320px}
     .table-wrap{overflow:auto}
@@ -1244,6 +1386,9 @@ export class BillingService {
     .extend{display:flex;align-items:center;gap:7px}
     .extend input{width:72px;min-height:34px}
     .extend button{min-height:34px;padding:7px 10px}
+    .license-actions{display:grid;grid-template-columns:128px 132px auto auto auto;gap:7px;align-items:center;min-width:520px}
+    .license-actions select,.license-actions input{min-height:34px;border-radius:9px;font-size:12px}
+    .license-actions button{min-height:34px;padding:7px 10px;white-space:nowrap}
     .client-toggle{width:30px;height:30px;min-height:30px;padding:0;border-radius:9px;margin-right:8px}
     .details-row td{background:var(--surface-soft)!important;color:var(--muted);font-size:13px}
     .details-grid{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:10px}
@@ -1307,10 +1452,10 @@ export class BillingService {
     </div>
 
     <div class="kpis">
-      <button class="kpi" onclick="setQuickFilter('')"><span>Клиентов</span><strong id="kpiClients">0</strong></button>
-      <button class="kpi" onclick="setQuickFilter('')"><span>Установленных виджетов</span><strong id="kpiWidgets">0</strong></button>
-      <button class="kpi" onclick="setQuickFilter('')"><span>Оплаченных лицензий amo</span><strong id="kpiLicenses">0</strong></button>
-      <button class="kpi" onclick="setQuickFilter('ending')"><span>Истекают за 14 дней</span><strong id="kpiEnding">0</strong></button>
+      <button class="kpi" onclick="setQuickFilter('')"><span>Клиентов</span><strong id="kpiClients">0</strong><small>Всего аккаунтов</small></button>
+      <button class="kpi" onclick="setQuickFilter('')"><span>Виджетов</span><strong id="kpiWidgets">0</strong><small>Установки в CRM</small></button>
+      <button class="kpi" onclick="setQuickFilter('')"><span>Платных лицензий amo</span><strong id="kpiLicenses">0</strong><small>Активные, не free</small></button>
+      <button class="kpi" onclick="setQuickFilter('ending')"><span>Истекают за 14 дней</span><strong id="kpiEnding">0</strong><small>Нажми для фильтра</small></button>
     </div>
 
     <section class="panel">
@@ -1338,7 +1483,7 @@ export class BillingService {
               <th><button class="sort" onclick="setSort('expires')">Дата окончания <span class="sortmark" id="sort-expires"></span></button></th>
               <th><button class="sort" onclick="setSort('installed')">Дата установки <span class="sortmark" id="sort-installed"></span></button></th>
               <th><button class="sort" onclick="setSort('legacy')">Legacy <span class="sortmark" id="sort-legacy"></span></button></th>
-              <th>Продлить</th>
+              <th>Управление</th>
             </tr>
             <tr class="filters">
               <th><select data-filter="crm" onchange="applyTable()"><option value="">Все</option><option value="amo">amo</option></select></th>
@@ -1412,6 +1557,7 @@ export class BillingService {
     function setStatus(id,text,mode){ const el=document.getElementById(id); if(!el) return; el.textContent=text||''; el.className='status-line'+(mode?' '+mode:''); }
     function isoToText(value){ if(!value) return '-'; const d=new Date(value); if(Number.isNaN(d.getTime())) return value; return d.toLocaleDateString('ru-RU',{timeZone:'Europe/Moscow'}); }
     function dateValue(value){ if(!value) return 0; const d=new Date(value); return Number.isNaN(d.getTime()) ? 0 : d.getTime(); }
+    function dateInputValue(value){ if(!value) return ''; const d=new Date(value); if(Number.isNaN(d.getTime())) return ''; const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,'0'); const day=String(d.getDate()).padStart(2,'0'); return y+'-'+m+'-'+day; }
     function shortDomain(value){ return String(value || '').replace(/^https?:\\/\\//i,'').replace(/\\/.*$/,'').replace(/\\.amocrm\\.ru$/i,'').replace(/\\.kommo\\.com$/i,'').replace(/\\.kommo\\.ru$/i,''); }
 
     async function apiFetch(url, options){
@@ -1552,8 +1698,9 @@ export class BillingService {
             widgetSlug: widget.widgetSlug || 'copy_leads',
             status: status.title || '-',
             statusState: status.state || '',
-            expires: isoToText(status.expiresAt),
-            expiresRaw: dateValue(status.expiresAt),
+            dateSource: status.expiresAt || status.paidUntil || status.trialEndsAt || status.graceExtendedUntil,
+            expires: isoToText(status.expiresAt || status.paidUntil || status.trialEndsAt || status.graceExtendedUntil),
+            expiresRaw: dateValue(status.expiresAt || status.paidUntil || status.trialEndsAt || status.graceExtendedUntil),
             installed: isoToText(widget.installedAt),
             installedRaw: dateValue(widget.installedAt),
             legacy: widget.isLegacy ? 'да' : 'нет',
@@ -1607,7 +1754,7 @@ export class BillingService {
       updateKpis();
       updateSortMarks();
       renderRows(rows);
-      document.getElementById('clientsMeta').textContent='Показано '+rows.length+' из '+state.rows.length+'. В колонке “Оплачено” — текущие платные лицензии amoCRM.';
+      document.getElementById('clientsMeta').textContent='Показано '+rows.length+' из '+state.rows.length+'. “Оплачено” — активные пользователи amoCRM, которые не являются бесплатными.';
     }
     function updateKpis(){
       const clients=new Set((state.rows||[]).map(function(row){ return row.clientKey; }));
@@ -1650,13 +1797,13 @@ export class BillingService {
         tr.innerHTML='<td><span class="pill amo">'+escapeHtml(row.crm)+'</span></td>'+
           '<td><div class="domain-main">'+escapeHtml(row.domain||'-')+'</div><div class="micro">ID '+escapeHtml(row.client||'-')+'</div></td>'+
           '<td><button class="secondary client-toggle" onclick="toggleClient(\\''+escapeHtml(row.clientKey)+'\\')">'+(opened?'−':'+')+'</button>'+escapeHtml(row.adminName||'Клиент')+'</td>'+
-          '<td><span class="pill">'+escapeHtml(row.licenses)+'</span><div class="micro">'+(row.licenseSource==='amo_paid'?'amoCRM':'сохранено')+'</div></td>'+
+          '<td><span class="pill">'+escapeHtml(row.licenses)+'</span><div class="micro">'+(row.licenseSource==='amo_paid_active'?'amoCRM':'сохранено')+'</div></td>'+
           '<td><b>'+escapeHtml(row.widget)+'</b><div class="micro">'+escapeHtml(row.widgetSlug)+'</div></td>'+
           '<td>'+statusPill(row)+'</td>'+
           '<td>'+escapeHtml(row.expires)+'</td>'+
           '<td>'+escapeHtml(row.installed)+'</td>'+
           '<td>'+escapeHtml(row.legacy)+'<div class="micro">'+escapeHtml(row.firstSeenSource||'')+'</div></td>'+
-          '<td>'+extendCell(row)+'</td>';
+          '<td>'+licenseControls(row)+'</td>';
         tbody.appendChild(tr);
         if(opened){
           const details=document.createElement('tr');
@@ -1671,9 +1818,26 @@ export class BillingService {
         }
       });
     }
-    function extendCell(row){
+    function licenseControls(row){
       if(!row.accountId) return '<span class="muted">Нет установки</span>';
-      return '<div class="extend"><input aria-label="Дней" type="number" min="1" value="30" id="days-widget-'+escapeHtml(row.accountId)+'" /><button onclick="extendWidget('+escapeHtml(row.accountId)+')">+ дни</button></div>';
+      const statusOptions=[
+        ['paid','Оплачен'],
+        ['paid_expired','Платный истёк'],
+        ['trial','Триал'],
+        ['expired','Триал истёк'],
+        ['grace','+1 день'],
+        ['not_activated','Не активирован'],
+        ['legacy_not_activated','Legacy']
+      ].map(function(item){
+        return '<option value="'+item[0]+'" '+(row.statusState===item[0]?'selected':'')+'>'+item[1]+'</option>';
+      }).join('');
+      return '<div class="license-actions">'+
+        '<select id="status-widget-'+escapeHtml(row.accountId)+'">'+statusOptions+'</select>'+
+        '<input type="date" id="date-widget-'+escapeHtml(row.accountId)+'" value="'+escapeHtml(dateInputValue(row.dateSource))+'" />'+
+        '<button onclick="saveWidgetLicense('+escapeHtml(row.accountId)+')">Сохранить</button>'+
+        '<button class="secondary" onclick="extendWidget('+escapeHtml(row.accountId)+')">+30 дней</button>'+
+        '<button class="danger" onclick="deleteWidget('+escapeHtml(row.accountId)+')">Удалить</button>'+
+        '</div>';
     }
     function toggleClient(key){ state.expanded[key]=state.expanded[key]!==true; applyTable(); }
 
@@ -1712,12 +1876,25 @@ export class BillingService {
       finally{ button.disabled=false; }
     }
     async function extendWidget(accountId){
-      const input=document.getElementById('days-widget-'+accountId);
-      const days=Number(input && input.value || 0);
+      const days=30;
       if(!Number.isFinite(days) || days < 1){ alert('Введите количество дней'); return; }
       const res=await apiFetch('/billing/admin/widget/'+accountId+'/extend',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ days:days }) });
       if(!res.ok){ alert('Ошибка: '+cleanError(await res.text())); return; }
       await loadAccounts();
+    }
+    async function saveWidgetLicense(accountId){
+      const status=document.getElementById('status-widget-'+accountId).value;
+      const paidUntil=document.getElementById('date-widget-'+accountId).value;
+      const res=await apiFetch('/billing/admin/widget/'+accountId+'/license',{ method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ status:status, paidUntil:paidUntil || null }) });
+      if(!res.ok){ alert('Ошибка: '+cleanError(await res.text())); return; }
+      await loadAccounts();
+    }
+    async function deleteWidget(accountId){
+      if(!confirm('Удалить эту установку виджета из админки полностью? Действие нельзя отменить.')) return;
+      const res=await apiFetch('/billing/admin/widget/'+accountId,{ method:'DELETE' });
+      if(!res.ok){ alert('Ошибка: '+cleanError(await res.text())); return; }
+      await loadAccounts();
+      await loadIntegrations();
     }
     async function testTelegram(){
       const res=await apiFetch('/billing/admin/test-telegram');
