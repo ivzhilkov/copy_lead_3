@@ -39,6 +39,12 @@ export class CrmClient {
   @Column({ type: 'datetime', nullable: true })
   pendingInstallNotifiedAt?: Date | null;
 
+  @Column({ type: 'boolean', default: false })
+  isLegacy: boolean;
+
+  @Column({ nullable: true })
+  firstSeenSource?: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 

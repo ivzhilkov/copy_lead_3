@@ -442,7 +442,9 @@ export class BillingService {
     };
   }
 
-  private toPendingAccountView(): LicenseView {
+  private toPendingAccountView(
+    client?: { isLegacy?: boolean; firstSeenSource?: string | null },
+  ): LicenseView {
     return {
       state: 'not_activated',
       title: 'Требуется авторизация',
@@ -456,8 +458,8 @@ export class BillingService {
       paidUntil: null,
       graceExtendedUntil: null,
       graceExtensionUsed: false,
-      isLegacy: false,
-      firstSeenSource: null,
+      isLegacy: Boolean(client?.isLegacy),
+      firstSeenSource: client?.firstSeenSource || null,
     };
   }
 
@@ -530,6 +532,7 @@ export class BillingService {
   private async upsertPendingClient(
     accountId: number,
     profile?: PublicProfilePayload,
+    options?: { isLegacy?: boolean; firstSeenSource?: string },
   ) {
     const normalized = this.serializeProfile(profile);
     const domain = normalizeAmoDomain(
@@ -546,6 +549,8 @@ export class BillingService {
       adminPhone: normalized.phone !== '-' ? normalized.phone : null,
       adminUserId: normalized.userId !== null ? normalized.userId : null,
       usersCount: normalized.usersCount > 0 ? normalized.usersCount : 0,
+      ...(options?.isLegacy !== undefined ? { isLegacy: options.isLegacy } : {}),
+      ...(options?.firstSeenSource ? { firstSeenSource: options.firstSeenSource } : {}),
     });
   }
 
@@ -695,8 +700,11 @@ export class BillingService {
     );
 
     if (!account) {
-      await this.upsertPendingClient(payload.accountId, payload.profile);
-      return this.toPendingAccountView();
+      const pendingClient = await this.upsertPendingClient(payload.accountId, payload.profile, {
+        isLegacy: true,
+        firstSeenSource: 'manual_copy',
+      });
+      return this.toPendingAccountView(pendingClient);
     }
 
     let updated = await this.upsertProfile(account, payload.profile);
@@ -1050,6 +1058,8 @@ export class BillingService {
         adminName: client.adminName,
         adminEmail: client.adminEmail,
         adminPhone: client.adminPhone,
+        isLegacy: Boolean(client.isLegacy),
+        firstSeenSource: client.firstSeenSource || null,
         paidLicensesCount,
         usersCount: paidLicensesCount,
         usersCountSource: liveUsersCount === null ? 'stored' : 'amo_paid_active',
@@ -1689,6 +1699,10 @@ export class BillingService {
         const widgets=client.widgets&&client.widgets.length?client.widgets:[{}];
         widgets.forEach(function(widget){
           const status=widget.status||{};
+          const legacy=Boolean(widget.isLegacy || client.isLegacy);
+          const firstSeenSource=widget.firstSeenSource || client.firstSeenSource || '';
+          const pendingStatusTitle=legacy && !widget.id ? 'Требуется авторизация' : '-';
+          const pendingStatusState=legacy && !widget.id ? 'not_activated' : '';
           const row={
             id: widget.id || client.amoId,
             clientKey: String(client.amoId || client.domain || ''),
@@ -1702,15 +1716,15 @@ export class BillingService {
             licenseSource: client.usersCountSource || 'stored',
             widget: widget.widgetName || 'Копирование сделок',
             widgetSlug: widget.widgetSlug || 'copy_leads',
-            status: status.title || '-',
-            statusState: status.state || '',
+            status: status.title || pendingStatusTitle,
+            statusState: status.state || pendingStatusState,
             dateSource: status.expiresAt || status.paidUntil || status.trialEndsAt || status.graceExtendedUntil,
             expires: isoToText(status.expiresAt || status.paidUntil || status.trialEndsAt || status.graceExtendedUntil),
             expiresRaw: dateValue(status.expiresAt || status.paidUntil || status.trialEndsAt || status.graceExtendedUntil),
             installed: isoToText(widget.installedAt),
             installedRaw: dateValue(widget.installedAt),
-            legacy: widget.isLegacy ? 'да' : 'нет',
-            firstSeenSource: widget.firstSeenSource || '',
+            legacy: legacy ? 'да' : 'нет',
+            firstSeenSource: firstSeenSource,
             accountId: widget.id
           };
           row.search = normalizeText([row.crm,row.domain,row.client,row.adminName,row.adminEmail,row.adminPhone,row.licenses,row.widget,row.widgetSlug,row.status,row.expires,row.installed,row.legacy,row.firstSeenSource].join(' '));
