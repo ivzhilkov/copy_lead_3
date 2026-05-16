@@ -7,11 +7,14 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectRepository } from '@nestjs/typeorm';
 import axios from 'axios';
-import { createHash } from 'crypto';
+import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'crypto';
 import { Account } from 'src/accounts/account.entity';
 import { AccountsService } from 'src/accounts/accounts.service';
 import { normalizeAmoDomain } from 'src/helpers/amo-domain';
+import { Repository } from 'typeorm';
+import { AdminCredential } from './admin-credential.entity';
 
 export type LicenseState =
   | 'not_activated'
@@ -65,6 +68,11 @@ type AdminLoginPayload = {
   password?: string;
 };
 
+type AdminSetupPayload = {
+  login?: string;
+  password?: string;
+};
+
 type LicenseView = {
   state: LicenseState;
   title: string;
@@ -88,6 +96,8 @@ export class BillingService {
   constructor(
     private readonly accountsService: AccountsService,
     private readonly configService: ConfigService,
+    @InjectRepository(AdminCredential)
+    private readonly adminCredentialRepo: Repository<AdminCredential>,
   ) {}
 
   private getNow() {
@@ -163,21 +173,88 @@ export class BillingService {
     ).trim();
   }
 
-  private createAdminSessionToken(login: string) {
+  private getAdminSessionToken(login: string, secret: string) {
     const normalizedLogin = String(login || '').trim();
-    const password = this.getAdminPassword();
-    const secret = this.getAdminSessionSecret();
     const hash = createHash('sha256')
-      .update(`${normalizedLogin}:${password}:${secret}`)
+      .update(`${normalizedLogin}:${secret}:${this.getAdminSessionSecret()}`)
       .digest('hex');
     return `${normalizedLogin}.${hash}`;
   }
 
-  loginAdmin(payload: AdminLoginPayload) {
+  private hashAdminPassword(password: string, salt: string) {
+    return scryptSync(password, salt, 64).toString('hex');
+  }
+
+  private verifyAdminPassword(password: string, salt: string, hash: string) {
+    const incoming = Buffer.from(this.hashAdminPassword(password, salt), 'hex');
+    const saved = Buffer.from(hash, 'hex');
+    return incoming.length === saved.length && timingSafeEqual(incoming, saved);
+  }
+
+  private async getStoredAdminCredential() {
+    return this.adminCredentialRepo.findOne({
+      order: { id: 'DESC' },
+    } as any);
+  }
+
+  async getAdminSetupStatus() {
+    const credential = await this.getStoredAdminCredential();
+    return {
+      needsSetup: !credential,
+      login: credential?.login || this.getAdminLogin(),
+    };
+  }
+
+  async setupAdminPassword(payload: AdminSetupPayload) {
+    const existing = await this.getStoredAdminCredential();
+    if (existing) {
+      throw new ForbiddenException('Пароль администратора уже задан');
+    }
+
+    const login = String(payload?.login || this.getAdminLogin() || 'admin').trim();
+    const password = String(payload?.password || '').trim();
+    if (!login) {
+      throw new BadRequestException('Введите логин');
+    }
+    if (password.length < 8) {
+      throw new BadRequestException('Пароль должен быть не короче 8 символов');
+    }
+
+    const salt = randomBytes(16).toString('hex');
+    const saved = await this.adminCredentialRepo.save({
+      login,
+      salt,
+      passwordHash: this.hashAdminPassword(password, salt),
+    });
+
+    return {
+      session: this.getAdminSessionToken(saved.login, saved.passwordHash),
+      login: saved.login,
+    };
+  }
+
+  async loginAdmin(payload: AdminLoginPayload) {
+    const stored = await this.getStoredAdminCredential();
+    if (stored) {
+      const login = String(payload?.login || '').trim();
+      const password = String(payload?.password || '').trim();
+      if (
+        login !== stored.login ||
+        !this.verifyAdminPassword(password, stored.salt, stored.passwordHash)
+      ) {
+        throw new UnauthorizedException('Неверный логин или пароль');
+      }
+
+      return {
+        session: this.getAdminSessionToken(stored.login, stored.passwordHash),
+        login: stored.login,
+      };
+    }
+
     const expectedLogin = this.getAdminLogin();
     const expectedPassword = this.getAdminPassword();
     if (!expectedPassword) {
-      throw new UnauthorizedException('ADMIN_PASSWORD или ADMIN_TOKEN не задан');
+      throw new UnauthorizedException('Сначала задайте пароль администратора');
     }
 
     const login = String(payload?.login || '').trim();
@@ -187,7 +264,7 @@ export class BillingService {
     }
 
     return {
-      session: this.createAdminSessionToken(login),
+      session: this.getAdminSessionToken(login, expectedPassword),
       login,
     };
   }
@@ -823,20 +900,28 @@ export class BillingService {
     }
   }
 
-  ensureAdminSessionOrThrow(session: string) {
+  async ensureAdminSessionOrThrow(session: string) {
+    const stored = await this.getStoredAdminCredential();
+    if (stored) {
+      if (!session || session !== this.getAdminSessionToken(stored.login, stored.passwordHash)) {
+        throw new UnauthorizedException('Сессия администратора истекла');
+      }
+      return;
+    }
+
     const expectedLogin = this.getAdminLogin();
     const expectedPassword = this.getAdminPassword();
     if (!expectedPassword) {
-      throw new UnauthorizedException('ADMIN_PASSWORD или ADMIN_TOKEN не задан');
+      throw new UnauthorizedException('Сначала задайте пароль администратора');
     }
-    if (!session || session !== this.createAdminSessionToken(expectedLogin)) {
+    if (!session || session !== this.getAdminSessionToken(expectedLogin, expectedPassword)) {
       throw new UnauthorizedException('Сессия администратора истекла');
     }
   }
 
-  ensureAdminAccessOrThrow(token: string, session: string) {
+  async ensureAdminAccessOrThrow(token: string, session: string) {
     if (session) {
-      this.ensureAdminSessionOrThrow(session);
+      await this.ensureAdminSessionOrThrow(session);
       return;
     }
     this.ensureAdminTokenOrThrow(token);
@@ -1156,6 +1241,29 @@ export class BillingService {
   </style>
 </head>
 <body>
+  <section id="setupView" class="login-wrap hidden">
+    <form class="login" onsubmit="setupPassword(event)">
+      <h1>Задайте пароль</h1>
+      <div class="subtitle">Это первый вход. Пароль сохранится для следующих входов в админку.</div>
+      <div class="field">
+        <label for="setupLogin">Логин</label>
+        <input id="setupLogin" autocomplete="username" value="admin" />
+      </div>
+      <div class="field">
+        <label for="setupPassword">Новый пароль</label>
+        <input id="setupPassword" type="password" autocomplete="new-password" />
+      </div>
+      <div class="field">
+        <label for="setupPasswordRepeat">Повторите пароль</label>
+        <input id="setupPasswordRepeat" type="password" autocomplete="new-password" />
+      </div>
+      <div class="login-actions">
+        <div id="setupStatus" class="status-line"></div>
+        <button id="setupButton" type="submit">Сохранить</button>
+      </div>
+    </form>
+  </section>
+
   <section id="loginView" class="login-wrap">
     <form class="login" onsubmit="login(event)">
       <h1>SimpleSales Admin</h1>
@@ -1334,6 +1442,52 @@ export class BillingService {
       el.className = 'status-line' + (mode ? ' ' + mode : '');
     }
 
+    function showSetup(login){
+      document.getElementById('setupView').classList.remove('hidden');
+      document.getElementById('loginView').classList.add('hidden');
+      document.getElementById('appView').classList.add('hidden');
+      document.getElementById('setupLogin').value = login || 'admin';
+    }
+
+    async function checkSetup(){
+      const res = await fetch('/billing/admin/setup-status');
+      if(!res.ok) return { needsSetup: false, login: 'admin' };
+      return res.json();
+    }
+
+    async function setupPassword(event){
+      if(event) event.preventDefault();
+      const button = document.getElementById('setupButton');
+      const login = document.getElementById('setupLogin').value.trim() || 'admin';
+      const password = document.getElementById('setupPassword').value.trim();
+      const repeat = document.getElementById('setupPasswordRepeat').value.trim();
+      if(password !== repeat){
+        setStatus('setupStatus', 'Пароли не совпадают', 'error');
+        return;
+      }
+      button.disabled = true;
+      setStatus('setupStatus', 'Сохраняю...', '');
+      try{
+        const res = await fetch('/billing/admin/setup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ login, password })
+        });
+        if(!res.ok) throw new Error(await res.text());
+        const data = await res.json();
+        localStorage.setItem(sessionKey, data.session);
+        localStorage.setItem(loginKey, data.login || login);
+        document.getElementById('setupPassword').value = '';
+        document.getElementById('setupPasswordRepeat').value = '';
+        showApp();
+        await loadAll();
+      }catch(e){
+        setStatus('setupStatus', cleanError(e.message), 'error');
+      }finally{
+        button.disabled = false;
+      }
+    }
+
     async function login(event){
       if(event) event.preventDefault();
       const button = document.getElementById('loginButton');
@@ -1362,12 +1516,14 @@ export class BillingService {
 
     function logout(){
       localStorage.removeItem(sessionKey);
+      document.getElementById('setupView').classList.add('hidden');
       document.getElementById('appView').classList.add('hidden');
       document.getElementById('loginView').classList.remove('hidden');
       setStatus('loginStatus', '', '');
     }
 
     function showApp(){
+      document.getElementById('setupView').classList.add('hidden');
       document.getElementById('loginView').classList.add('hidden');
       document.getElementById('appView').classList.remove('hidden');
     }
@@ -1619,7 +1775,7 @@ export class BillingService {
         const tr = document.createElement('tr');
         tr.className = 'client-row';
         tr.innerHTML =
-          '<td><div class="client-title"><button class="chevron" onclick="toggleClient(\\'' + escapeHtml(key) + '\\')">' + (opened ? '⌄' : '›') + '</button>' + escapeHtml(row.amoId || '-') + '</div></td>' +
+          '<td><div class="client-title"><button class="chevron" data-key="' + escapeHtml(key) + '" onclick="toggleClientByButton(this)">' + (opened ? '⌄' : '›') + '</button>' + escapeHtml(row.amoId || '-') + '</div></td>' +
           '<td><b>' + escapeHtml(row.domain || '-') + '</b></td>' +
           '<td><span class="pill">' + escapeHtml(row.usersCount || 0) + '</span><div class="domain">' + (row.usersCountSource === 'amo' ? 'amoCRM' : 'сохранено') + '</div></td>' +
           '<td><div>' + escapeHtml(row.adminName || '-') + '</div><div class="muted">' + escapeHtml(row.adminEmail || '-') + '</div><div class="muted">' + escapeHtml(row.adminPhone || '-') + '</div></td>' +
@@ -1654,6 +1810,10 @@ export class BillingService {
     function toggleClient(key){
       state.expanded[key] = state.expanded[key] !== true;
       applyTable();
+    }
+
+    function toggleClientByButton(button){
+      toggleClient(button.dataset.key || '');
     }
 
     function openManualModal(){
@@ -1735,9 +1895,15 @@ export class BillingService {
       }
     }
 
-    (function boot(){
+    (async function boot(){
       const savedLogin = localStorage.getItem(loginKey);
       if(savedLogin) document.getElementById('login').value = savedLogin;
+      const setup = await checkSetup();
+      if(setup.needsSetup){
+        localStorage.removeItem(sessionKey);
+        showSetup(setup.login);
+        return;
+      }
       if(localStorage.getItem(sessionKey)){
         showApp();
         loadAll();

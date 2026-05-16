@@ -16,8 +16,8 @@ import { BillingService } from './billing.service';
 export class BillingController {
   constructor(private readonly billingService: BillingService) {}
 
-  private ensureAdmin(req: Request) {
-    this.billingService.ensureAdminAccessOrThrow(
+  private async ensureAdmin(req: Request) {
+    await this.billingService.ensureAdminAccessOrThrow(
       String(req.headers['x-admin-token'] || ''),
       String(req.headers['x-admin-session'] || ''),
     );
@@ -105,15 +105,30 @@ export class BillingController {
     return this.billingService.loginAdmin(body);
   }
 
+  @Get('/admin/setup-status')
+  async adminSetupStatus() {
+    return this.billingService.getAdminSetupStatus();
+  }
+
+  @Post('/admin/setup')
+  async adminSetup(
+    @Body() body: {
+      login?: string;
+      password?: string;
+    },
+  ) {
+    return this.billingService.setupAdminPassword(body);
+  }
+
   @Get('/admin/accounts')
   async getAdminAccounts(@Req() req: Request) {
-    this.ensureAdmin(req);
+    await this.ensureAdmin(req);
     return this.billingService.getAdminAccounts();
   }
 
   @Get('/admin/integrations')
   async getAdminIntegrations(@Req() req: Request) {
-    this.ensureAdmin(req);
+    await this.ensureAdmin(req);
     return this.billingService.getAdminIntegrations();
   }
 
@@ -122,7 +137,7 @@ export class BillingController {
     @Req() req: Request,
     @Param('accountId') accountIdRaw: string,
   ) {
-    this.ensureAdmin(req);
+    await this.ensureAdmin(req);
     return this.billingService.getAdminAmoWidgetInfo(Number(accountIdRaw));
   }
 
@@ -139,7 +154,7 @@ export class BillingController {
       amoDomain?: string;
     },
   ) {
-    this.ensureAdmin(req);
+    await this.ensureAdmin(req);
     return this.billingService.saveAdminIntegration(body);
   }
 
@@ -148,7 +163,7 @@ export class BillingController {
     @Req() req: Request,
     @Param('widgetCode') widgetCode: string,
   ) {
-    this.ensureAdmin(req);
+    await this.ensureAdmin(req);
     return this.billingService.deleteAdminIntegration(widgetCode);
   }
 
@@ -157,13 +172,13 @@ export class BillingController {
     @Req() req: Request,
     @Param('amoIdOrDomain') amoIdOrDomain: string,
   ) {
-    this.ensureAdmin(req);
+    await this.ensureAdmin(req);
     return this.billingService.deleteAdminClientInstallations(amoIdOrDomain);
   }
 
   @Get('/admin/test-telegram')
   async testTelegram(@Req() req: Request) {
-    this.ensureAdmin(req);
+    await this.ensureAdmin(req);
     return this.billingService.sendTestTelegramMessage();
   }
 
@@ -173,7 +188,7 @@ export class BillingController {
     @Param('amoId') amoIdRaw: string,
     @Body('days') daysRaw: string | number,
   ) {
-    this.ensureAdmin(req);
+    await this.ensureAdmin(req);
     return this.billingService.extendByDays(Number(amoIdRaw), Number(daysRaw));
   }
 
@@ -183,7 +198,7 @@ export class BillingController {
     @Param('accountId') accountIdRaw: string,
     @Body('days') daysRaw: string | number,
   ) {
-    this.ensureAdmin(req);
+    await this.ensureAdmin(req);
     return this.billingService.extendAccountById(
       Number(accountIdRaw),
       Number(daysRaw),
