@@ -927,41 +927,50 @@ export class BillingService {
     this.ensureAdminTokenOrThrow(token);
   }
 
-  private isActiveAmoUser(user: any) {
+  private getCrmKind() {
+    return 'amo';
+  }
+
+  private toCrmSubdomain(domain?: string | null) {
+    const normalized = normalizeAmoDomain(domain || '');
+    return normalized
+      .replace(/\.amocrm\.ru$/i, '')
+      .replace(/\.kommo\.com$/i, '')
+      .replace(/\.kommo\.ru$/i, '');
+  }
+
+  private isPaidAmoLicenseUser(user: any) {
     const rights = user?.rights || {};
-    const explicitInactive =
-      user?.is_active === false ||
-      user?.active === false ||
-      user?.isActive === false ||
-      user?.is_deleted === true ||
-      user?.isDeleted === true ||
-      rights?.is_active === false ||
-      rights?.active === false;
     const explicitFree =
       user?.is_free === true ||
       user?.isFree === true ||
       rights?.is_free === true ||
       rights?.isFree === true;
     const botType = String(user?.type || user?.user_type || '').toLowerCase();
-    return !explicitInactive && !explicitFree && botType !== 'bot';
+    return !explicitFree && botType !== 'bot';
   }
 
-  private async getCurrentAmoPaidUsersCount(account?: Account | null) {
+  private async getCurrentAmoPaidLicensesCount(account?: Account | null) {
     if (!account) return null;
     try {
       const api = this.accountsService.createConnector(
         account.amoId,
         account.widgetCode || undefined,
       );
-      const response = await api.get('/api/v4/users', {
-        params: { limit: 250 },
-      });
-      const users =
-        response.data?._embedded?.users ||
-        response.data?.users ||
-        (Array.isArray(response.data) ? response.data : []);
-      if (!Array.isArray(users)) return null;
-      return users.filter((user) => this.isActiveAmoUser(user)).length;
+      const users = [];
+      for (let page = 1; page <= 20; page += 1) {
+        const response = await api.get('/api/v4/users', {
+          params: { limit: 250, page },
+        });
+        const pageUsers =
+          response.data?._embedded?.users ||
+          response.data?.users ||
+          (Array.isArray(response.data) ? response.data : []);
+        if (!Array.isArray(pageUsers) || pageUsers.length === 0) break;
+        users.push(...pageUsers);
+        if (pageUsers.length < 250) break;
+      }
+      return users.filter((user) => this.isPaidAmoLicenseUser(user)).length;
     } catch (e) {
       this.logger.warn(
         `Не удалось получить текущие лицензии amoCRM для ${account.amoId}: ${
@@ -979,16 +988,20 @@ export class BillingService {
 
     for (const client of clients) {
       const widgets = client.widgets || [];
-      const liveUsersCount = await this.getCurrentAmoPaidUsersCount(widgets[0]);
+      const liveUsersCount = await this.getCurrentAmoPaidLicensesCount(widgets[0]);
+      const paidLicensesCount = liveUsersCount ?? (client.usersCount || 0);
       clientRows.push({
         id: client.id,
         amoId: client.amoId,
+        crm: this.getCrmKind(),
         domain: client.domain,
+        domainShort: this.toCrmSubdomain(client.domain),
         adminName: client.adminName,
         adminEmail: client.adminEmail,
         adminPhone: client.adminPhone,
-        usersCount: liveUsersCount ?? (client.usersCount || 0),
-        usersCountSource: liveUsersCount === null ? 'stored' : 'amo',
+        paidLicensesCount,
+        usersCount: paidLicensesCount,
+        usersCountSource: liveUsersCount === null ? 'stored' : 'amo_paid',
         widgets: widgets.map((account) => this.toAdminAccountRow(account)),
       });
     }
@@ -996,16 +1009,20 @@ export class BillingService {
     const knownClientIds = new Set(clientRows.map((client) => client.amoId));
     for (const account of accounts) {
       if (knownClientIds.has(account.amoId)) continue;
-      const liveUsersCount = await this.getCurrentAmoPaidUsersCount(account);
+      const liveUsersCount = await this.getCurrentAmoPaidLicensesCount(account);
+      const paidLicensesCount = liveUsersCount ?? (account.usersCount || 0);
       clientRows.push({
         id: null,
         amoId: account.amoId,
+        crm: this.getCrmKind(),
         domain: account.domain,
+        domainShort: this.toCrmSubdomain(account.domain),
         adminName: account.adminName,
         adminEmail: account.adminEmail,
         adminPhone: account.adminPhone,
-        usersCount: liveUsersCount ?? (account.usersCount || 0),
-        usersCountSource: liveUsersCount === null ? 'stored' : 'amo',
+        paidLicensesCount,
+        usersCount: paidLicensesCount,
+        usersCountSource: liveUsersCount === null ? 'stored' : 'amo_paid',
         widgets: [this.toAdminAccountRow(account)],
       });
     }
@@ -1104,24 +1121,27 @@ export class BillingService {
   }
 
   private toAdminAccountRow(account: Account) {
-      const status = this.toPublicLicenseView(account);
-      return {
-        id: account.id,
-        amoId: account.amoId,
-        domain: account.domain,
-        widgetName: account.widgetName || account.integration?.widgetName || 'Копирование сделок',
-        widgetSlug: account.widgetSlug || account.integration?.widgetSlug || 'copy_leads',
-        widgetCode: account.widgetCode || account.integration?.widgetCode,
-        amoClientId: account.amoClientId || account.integration?.amoClientId,
-        adminName: account.adminName,
-        adminEmail: account.adminEmail,
-        adminPhone: account.adminPhone,
-        usersCount: account.usersCount || 0,
-        installedAt: this.toIso(account.installedAt),
-        isLegacy: Boolean(account.isLegacy),
-        firstSeenSource: account.firstSeenSource || null,
-        status,
-      };
+    const status = this.toPublicLicenseView(account);
+    return {
+      id: account.id,
+      amoId: account.amoId,
+      crm: this.getCrmKind(),
+      domain: account.domain,
+      domainShort: this.toCrmSubdomain(account.domain),
+      widgetName:
+        account.widgetName || account.integration?.widgetName || 'Копирование сделок',
+      widgetSlug: account.widgetSlug || account.integration?.widgetSlug || 'copy_leads',
+      widgetCode: account.widgetCode || account.integration?.widgetCode,
+      amoClientId: account.amoClientId || account.integration?.amoClientId,
+      adminName: account.adminName,
+      adminEmail: account.adminEmail,
+      adminPhone: account.adminPhone,
+      usersCount: account.usersCount || 0,
+      installedAt: this.toIso(account.installedAt),
+      isLegacy: Boolean(account.isLegacy),
+      firstSeenSource: account.firstSeenSource || null,
+      status,
+    };
   }
 
   async extendByDays(amoId: number, days: number) {
@@ -1169,125 +1189,114 @@ export class BillingService {
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Админка виджета</title>
+  <title>SimpleSales Admin</title>
   <style>
-    :root{color-scheme:light;--bg:#f5f5f7;--surface:rgba(255,255,255,.82);--surface-solid:#fff;--line:rgba(60,60,67,.14);--line-strong:rgba(60,60,67,.24);--text:#1d1d1f;--muted:#6e6e73;--blue:#007aff;--green:#34c759;--red:#ff3b30;--orange:#ff9500;--shadow:0 18px 45px rgba(0,0,0,.08)}
+    :root{color-scheme:light;--bg:#f4f5f7;--surface:#fff;--surface-soft:#f8f9fb;--line:#e5e7eb;--line-strong:#d1d5db;--text:#111827;--muted:#6b7280;--muted-2:#9ca3af;--blue:#2563eb;--blue-dark:#1d4ed8;--green:#15803d;--green-bg:#eaf7ee;--red:#dc2626;--red-bg:#fef2f2;--orange:#b45309;--orange-bg:#fff7ed;--shadow:0 18px 44px rgba(17,24,39,.08)}
     *{box-sizing:border-box}
-    body{font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",sans-serif;background:linear-gradient(180deg,#fbfbfd 0%,var(--bg) 42%,#ededf1 100%);color:var(--text);margin:0;min-height:100vh}
+    body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Arial,sans-serif;font-size:14px}
     button,input,select{font:inherit}
-    button{border:0;border-radius:10px;background:var(--blue);color:#fff;padding:9px 13px;cursor:pointer;transition:transform .12s ease,background .12s ease,opacity .12s ease,box-shadow .12s ease}
-    button:hover{box-shadow:0 8px 22px rgba(0,122,255,.22)}
-    button:active{transform:scale(.98)}
-    button:disabled{cursor:not-allowed;opacity:.48;box-shadow:none}
-    button.secondary{background:#fff;color:var(--text);border:1px solid var(--line-strong)}
-    button.secondary:hover{box-shadow:0 8px 22px rgba(0,0,0,.07)}
-    button.danger{background:#fff;color:var(--red);border:1px solid rgba(255,59,48,.32)}
-    input,select{width:100%;border:1px solid var(--line);border-radius:10px;background:rgba(255,255,255,.9);color:var(--text);padding:9px 11px;outline:none;transition:border .12s ease,box-shadow .12s ease}
-    input:focus,select:focus{border-color:rgba(0,122,255,.58);box-shadow:0 0 0 4px rgba(0,122,255,.12)}
-    label{display:block;font-size:12px;font-weight:650;color:var(--muted);margin:0 0 6px}
-    h1,h2{margin:0}
-    h1{font-size:28px;line-height:1.1;letter-spacing:0}
-    h2{font-size:18px;line-height:1.2}
-    .page{width:min(1480px,calc(100% - 36px));margin:0 auto;padding:26px 0 42px}
-    .topbar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}
-    .subtitle{margin-top:7px;color:var(--muted);font-size:14px}
-    .panel{background:var(--surface);backdrop-filter:blur(22px);border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);padding:16px;margin-bottom:16px}
-    .panel-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px}
-    .toolbar{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
-    .search{min-width:320px;max-width:520px}
-    .grid{display:grid;grid-template-columns:repeat(2,minmax(220px,1fr));gap:12px}
+    button{display:inline-flex;align-items:center;justify-content:center;gap:7px;border:1px solid transparent;border-radius:10px;background:var(--blue);color:#fff;min-height:38px;padding:8px 13px;font-weight:650;cursor:pointer;transition:background .14s ease,border .14s ease,box-shadow .14s ease,transform .08s ease}
+    button:hover{background:var(--blue-dark);box-shadow:0 8px 18px rgba(37,99,235,.2)}
+    button:active{transform:translateY(1px)}
+    button:disabled{opacity:.52;cursor:not-allowed;box-shadow:none;transform:none}
+    button.secondary{background:#fff;color:var(--text);border-color:var(--line)}
+    button.secondary:hover{background:var(--surface-soft);box-shadow:none}
+    input,select{width:100%;min-height:38px;border:1px solid var(--line);border-radius:10px;background:#fff;color:var(--text);padding:8px 10px;outline:none}
+    input:focus,select:focus{border-color:#93c5fd;box-shadow:0 0 0 4px rgba(37,99,235,.12)}
+    label{display:block;margin:0 0 6px;color:var(--muted);font-size:12px;font-weight:700}
+    h1,h2{margin:0;letter-spacing:0}
+    h1{font-size:26px;line-height:1.16}
+    h2{font-size:17px;line-height:1.25}
+    .hidden{display:none!important}
+    .page{width:min(1500px,calc(100% - 32px));margin:0 auto;padding:22px 0 42px}
+    .topbar{display:flex;justify-content:space-between;align-items:flex-start;gap:18px;margin-bottom:16px}
+    .subtitle{margin-top:6px;color:var(--muted);font-size:13px}
+    .toolbar{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+    .panel{background:var(--surface);border:1px solid var(--line);border-radius:14px;box-shadow:var(--shadow);margin-bottom:14px}
+    .panel-head{display:flex;align-items:flex-start;justify-content:space-between;gap:14px;padding:16px;border-bottom:1px solid var(--line)}
+    .kpis{display:grid;grid-template-columns:repeat(4,minmax(160px,1fr));gap:10px;margin-bottom:14px}
+    .kpi{background:#fff;border:1px solid var(--line);border-radius:12px;padding:13px;text-align:left;color:var(--text);box-shadow:none;min-height:84px;align-items:flex-start}
+    .kpi:hover{border-color:#bfdbfe;background:#fbfdff;box-shadow:none}
+    .kpi span{display:block;color:var(--muted);font-size:12px;font-weight:700}
+    .kpi strong{display:block;margin-top:7px;font-size:26px;line-height:1}
+    .searchbar{display:flex;gap:10px;align-items:center;min-width:min(520px,100%)}
+    .searchbar input{min-width:320px}
+    .table-wrap{overflow:auto}
+    table{width:100%;border-collapse:separate;border-spacing:0;min-width:1220px}
+    th,td{border-bottom:1px solid var(--line);padding:10px 12px;text-align:left;vertical-align:middle}
+    thead th{position:sticky;top:0;background:#fff;z-index:2;color:var(--muted);font-size:12px;font-weight:800;white-space:nowrap}
+    thead tr.filters th{top:39px;background:var(--surface-soft);padding:7px 8px}
+    thead input,thead select{min-height:30px;border-radius:8px;font-size:12px;padding:5px 8px}
+    tbody tr:hover td{background:#fbfdff}
+    tbody tr:last-child td{border-bottom:0}
+    .sort{border:0;background:transparent;color:inherit;padding:0;min-height:auto;font-size:12px;font-weight:800}
+    .sort:hover{background:transparent;color:var(--text);box-shadow:none}
+    .sortmark{display:inline-block;width:12px;color:var(--blue)}
+    .domain-main{font-weight:760}
+    .micro{color:var(--muted);font-size:12px;margin-top:2px}
+    .muted{color:var(--muted)}
+    .pill{display:inline-flex;align-items:center;justify-content:center;min-height:24px;border:1px solid var(--line);border-radius:999px;background:#fff;color:var(--text);font-size:12px;font-weight:750;padding:3px 8px;white-space:nowrap}
+    .pill.amo{text-transform:uppercase;letter-spacing:.02em}
+    .pill.ok{background:var(--green-bg);border-color:#bbf7d0;color:var(--green)}
+    .pill.bad{background:var(--red-bg);border-color:#fecaca;color:var(--red)}
+    .pill.warn{background:var(--orange-bg);border-color:#fed7aa;color:var(--orange)}
+    .pill.gray{background:#f3f4f6;color:var(--muted)}
+    .extend{display:flex;align-items:center;gap:7px}
+    .extend input{width:72px;min-height:34px}
+    .extend button{min-height:34px;padding:7px 10px}
+    .client-toggle{width:30px;height:30px;min-height:30px;padding:0;border-radius:9px;margin-right:8px}
+    .details-row td{background:var(--surface-soft)!important;color:var(--muted);font-size:13px}
+    .details-grid{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:10px}
+    .detail-label{font-size:11px;text-transform:uppercase;color:var(--muted-2);font-weight:800;margin-bottom:3px}
+    .state{padding:22px;text-align:center;color:var(--muted)}
+    .state.error{color:var(--red);background:var(--red-bg);border:1px solid #fecaca;border-radius:12px;margin:12px}
+    .skeleton{height:15px;border-radius:999px;background:linear-gradient(90deg,#eef0f3,#fff,#eef0f3);background-size:220% 100%;animation:pulse 1.15s linear infinite}
+    @keyframes pulse{to{background-position:-220% 0}}
     .login-wrap{min-height:100vh;display:grid;place-items:center;padding:20px}
-    .login{width:min(420px,100%);background:rgba(255,255,255,.86);border:1px solid var(--line);border-radius:22px;box-shadow:var(--shadow);padding:22px}
-    .login h1{font-size:24px;margin-bottom:8px}
-    .login .field{margin-top:14px}
+    .login{width:min(420px,100%);background:#fff;border:1px solid var(--line);border-radius:18px;box-shadow:var(--shadow);padding:22px}
+    .field{margin-top:14px}
     .login-actions{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-top:18px}
-    .status-line{min-height:20px;color:var(--muted);font-size:13px}
+    .status-line{min-height:20px;margin-top:10px;color:var(--muted);font-size:13px}
     .status-line.error{color:var(--red)}
     .status-line.ok{color:var(--green)}
-    .table-wrap{overflow:auto;border:1px solid var(--line);border-radius:14px;background:rgba(255,255,255,.62)}
-    table{width:100%;border-collapse:separate;border-spacing:0;font-size:13px;min-width:1180px}
-    th,td{border-bottom:1px solid var(--line);padding:10px 11px;text-align:left;vertical-align:top}
-    thead th{position:sticky;top:0;background:rgba(246,246,248,.96);z-index:1;color:var(--muted);font-size:12px;font-weight:700}
-    thead .filter-row th{top:39px;background:rgba(250,250,252,.96);padding:7px}
-    thead input,thead select{height:30px;padding:5px 8px;border-radius:8px;font-size:12px}
-    tbody tr:hover{background:rgba(0,122,255,.045)}
-    tbody tr:last-child td{border-bottom:0}
-    .sort{display:inline-flex;align-items:center;gap:5px;background:transparent;color:inherit;border:0;padding:0;box-shadow:none;font-weight:700}
-    .sort:hover{box-shadow:none;color:var(--text)}
-    .chevron{display:inline-grid;place-items:center;width:26px;height:26px;border-radius:8px;background:#fff;border:1px solid var(--line);color:var(--text);margin-right:8px}
-    .client-title{display:flex;align-items:center;gap:4px;font-weight:760}
-    .domain{color:var(--muted);font-size:12px;margin-top:3px}
-    .widget-row td{background:rgba(255,255,255,.48)}
-    .widget-name{padding-left:45px;font-weight:650}
-    .muted{color:var(--muted)}
-    .pill{display:inline-flex;align-items:center;gap:5px;border-radius:999px;padding:4px 8px;background:#fff;border:1px solid var(--line);font-size:12px;font-weight:650;white-space:nowrap}
-    .pill.green{color:#0a7c2f;background:rgba(52,199,89,.12);border-color:rgba(52,199,89,.24)}
-    .pill.red{color:#bd1d15;background:rgba(255,59,48,.1);border-color:rgba(255,59,48,.22)}
-    .pill.orange{color:#9a5a00;background:rgba(255,149,0,.12);border-color:rgba(255,149,0,.24)}
-    .pill.gray{color:var(--muted)}
-    .actions{display:flex;align-items:center;gap:8px}
-    .actions input{width:76px}
-    .state{padding:18px;color:var(--muted);text-align:center}
-    .skeleton{height:15px;border-radius:999px;background:linear-gradient(90deg,#ececf0,#fafafa,#ececf0);background-size:220% 100%;animation:pulse 1.2s linear infinite}
-    @keyframes pulse{to{background-position:-220% 0}}
-    .modal-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.22);backdrop-filter:blur(10px);display:none;align-items:center;justify-content:center;padding:18px;z-index:20}
+    .modal-backdrop{position:fixed;inset:0;display:none;align-items:center;justify-content:center;background:rgba(17,24,39,.34);padding:18px;z-index:20}
     .modal-backdrop.open{display:flex}
-    .modal{width:min(620px,100%);background:rgba(255,255,255,.92);border:1px solid var(--line);border-radius:20px;box-shadow:0 30px 80px rgba(0,0,0,.22);padding:18px}
-    .modal-head{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;margin-bottom:14px}
-    .modal-close{width:32px;height:32px;border-radius:50%;padding:0;background:#e5e5ea;color:var(--text)}
-    .modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:16px}
-    .hidden{display:none!important}
-    @media(max-width:760px){.page{width:min(100% - 20px,1480px);padding-top:16px}.topbar,.panel-head{align-items:flex-start;flex-direction:column}.toolbar{width:100%}.search{min-width:0;width:100%}.grid{grid-template-columns:1fr}h1{font-size:24px}}
+    .modal{width:min(620px,100%);background:#fff;border:1px solid var(--line);border-radius:16px;box-shadow:0 26px 80px rgba(17,24,39,.28);padding:18px}
+    .modal-head{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;margin-bottom:14px}
+    .modal-close{width:32px;height:32px;min-height:32px;padding:0;border-radius:999px;background:var(--surface-soft);border-color:var(--line);color:var(--muted)}
+    .modal-close:hover{background:#eef0f3;color:var(--text);box-shadow:none}
+    .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+    .modal-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:14px}
+    @media(max-width:860px){.page{width:calc(100% - 20px);padding-top:14px}.topbar,.panel-head{flex-direction:column}.toolbar,.searchbar{width:100%;justify-content:flex-start}.searchbar input{min-width:0}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.grid,.details-grid{grid-template-columns:1fr}h1{font-size:23px}}
   </style>
 </head>
 <body>
   <section id="setupView" class="login-wrap hidden">
     <form class="login" onsubmit="submitSetupPassword(event)">
       <h1>Задайте пароль</h1>
-      <div class="subtitle">Это первый вход. Пароль сохранится для следующих входов в админку.</div>
-      <div class="field">
-        <label for="setupLogin">Логин</label>
-        <input id="setupLogin" autocomplete="username" value="admin" />
-      </div>
-      <div class="field">
-        <label for="setupPasswordInput">Новый пароль</label>
-        <input id="setupPasswordInput" type="password" autocomplete="new-password" />
-      </div>
-      <div class="field">
-        <label for="setupPasswordRepeatInput">Повторите пароль</label>
-        <input id="setupPasswordRepeatInput" type="password" autocomplete="new-password" />
-      </div>
-      <div class="login-actions">
-        <div id="setupStatus" class="status-line"></div>
-        <button id="setupButton" type="submit">Сохранить</button>
-      </div>
+      <div class="subtitle">Первый вход в админку. Дальше пароль будет сохранён на сервере.</div>
+      <div class="field"><label for="setupLogin">Логин</label><input id="setupLogin" autocomplete="username" value="admin" /></div>
+      <div class="field"><label for="setupPasswordInput">Новый пароль</label><input id="setupPasswordInput" type="password" autocomplete="new-password" /></div>
+      <div class="field"><label for="setupPasswordRepeatInput">Повторите пароль</label><input id="setupPasswordRepeatInput" type="password" autocomplete="new-password" /></div>
+      <div class="login-actions"><div id="setupStatus" class="status-line"></div><button id="setupButton" type="submit">Сохранить</button></div>
     </form>
   </section>
 
   <section id="loginView" class="login-wrap">
     <form class="login" onsubmit="submitLogin(event)">
       <h1>SimpleSales Admin</h1>
-      <div class="subtitle">Вход в кабинет управления клиентами и приватными виджетами.</div>
-      <div class="field">
-        <label for="adminLoginInput">Логин</label>
-        <input id="adminLoginInput" autocomplete="username" />
-      </div>
-      <div class="field">
-        <label for="adminPasswordInput">Пароль</label>
-        <input id="adminPasswordInput" type="password" autocomplete="current-password" />
-      </div>
-      <div class="login-actions">
-        <div id="loginStatus" class="status-line"></div>
-        <button id="loginButton" type="submit">Войти</button>
-      </div>
+      <div class="subtitle">Кабинет клиентов, лицензий и приватных виджетов.</div>
+      <div class="field"><label for="adminLoginInput">Логин</label><input id="adminLoginInput" autocomplete="username" /></div>
+      <div class="field"><label for="adminPasswordInput">Пароль</label><input id="adminPasswordInput" type="password" autocomplete="current-password" /></div>
+      <div class="login-actions"><div id="loginStatus" class="status-line"></div><button id="loginButton" type="submit">Войти</button></div>
     </form>
   </section>
 
   <main id="appView" class="page hidden">
     <div class="topbar">
       <div>
-        <h1>Админка виджетов SimpleSales</h1>
-        <div class="subtitle">Клиенты, лицензии amoCRM и установленные приватные виджеты.</div>
+        <h1>Клиенты и виджеты</h1>
+        <div class="subtitle">Основная строка — установленный виджет. Даты, legacy и продление относятся к конкретному виджету.</div>
       </div>
       <div class="toolbar">
         <button onclick="openManualModal()">Добавить пользователя</button>
@@ -1297,52 +1306,54 @@ export class BillingService {
       </div>
     </div>
 
+    <div class="kpis">
+      <button class="kpi" onclick="setQuickFilter('')"><span>Клиентов</span><strong id="kpiClients">0</strong></button>
+      <button class="kpi" onclick="setQuickFilter('')"><span>Установленных виджетов</span><strong id="kpiWidgets">0</strong></button>
+      <button class="kpi" onclick="setQuickFilter('')"><span>Оплаченных лицензий amo</span><strong id="kpiLicenses">0</strong></button>
+      <button class="kpi" onclick="setQuickFilter('ending')"><span>Истекают за 14 дней</span><strong id="kpiEnding">0</strong></button>
+    </div>
+
     <section class="panel">
       <div class="panel-head">
         <div>
-          <h2>Клиенты и установленные виджеты</h2>
+          <h2>Установленные виджеты</h2>
           <div id="clientsMeta" class="subtitle">Загрузка...</div>
         </div>
-        <input id="globalSearch" class="search" placeholder="Поиск по любому столбцу" oninput="applyTable()" />
+        <div class="searchbar">
+          <input id="globalSearch" placeholder="Поиск по любому столбцу" oninput="applyTable()" />
+          <button class="secondary" onclick="clearFilters()">Сбросить</button>
+        </div>
       </div>
-      <div id="clientsError" class="state hidden"></div>
+      <div id="clientsError" class="state error hidden"></div>
       <div class="table-wrap">
         <table id="clientsTable">
           <thead>
             <tr>
-              <th><button class="sort" onclick="setSort('client')">Клиент <span id="sort-client"></span></button></th>
-              <th><button class="sort" onclick="setSort('domain')">Домен <span id="sort-domain"></span></button></th>
-              <th><button class="sort" onclick="setSort('users')">Юзеры <span id="sort-users"></span></button></th>
-              <th><button class="sort" onclick="setSort('admin')">Админ <span id="sort-admin"></span></button></th>
-              <th><button class="sort" onclick="setSort('widgets')">Виджеты <span id="sort-widgets"></span></button></th>
-              <th><button class="sort" onclick="setSort('status')">Статус <span id="sort-status"></span></button></th>
-              <th><button class="sort" onclick="setSort('expires')">Дата окончания <span id="sort-expires"></span></button></th>
-              <th><button class="sort" onclick="setSort('installed')">Дата установки <span id="sort-installed"></span></button></th>
-              <th><button class="sort" onclick="setSort('legacy')">Legacy <span id="sort-legacy"></span></button></th>
-              <th>Действие</th>
+              <th><button class="sort" onclick="setSort('crm')">CRM <span class="sortmark" id="sort-crm"></span></button></th>
+              <th><button class="sort" onclick="setSort('domain')">Домен <span class="sortmark" id="sort-domain"></span></button></th>
+              <th><button class="sort" onclick="setSort('client')">Клиент <span class="sortmark" id="sort-client"></span></button></th>
+              <th><button class="sort" onclick="setSort('licenses')">Оплачено <span class="sortmark" id="sort-licenses"></span></button></th>
+              <th><button class="sort" onclick="setSort('widget')">Виджет <span class="sortmark" id="sort-widget"></span></button></th>
+              <th><button class="sort" onclick="setSort('status')">Статус <span class="sortmark" id="sort-status"></span></button></th>
+              <th><button class="sort" onclick="setSort('expires')">Дата окончания <span class="sortmark" id="sort-expires"></span></button></th>
+              <th><button class="sort" onclick="setSort('installed')">Дата установки <span class="sortmark" id="sort-installed"></span></button></th>
+              <th><button class="sort" onclick="setSort('legacy')">Legacy <span class="sortmark" id="sort-legacy"></span></button></th>
+              <th>Продлить</th>
             </tr>
-            <tr class="filter-row">
-              <th><input data-filter="client" oninput="applyTable()" placeholder="Фильтр" /></th>
-              <th><input data-filter="domain" oninput="applyTable()" placeholder="Фильтр" /></th>
-              <th><input data-filter="users" oninput="applyTable()" placeholder="Фильтр" /></th>
-              <th><input data-filter="admin" oninput="applyTable()" placeholder="Фильтр" /></th>
-              <th><input data-filter="widgets" oninput="applyTable()" placeholder="Фильтр" /></th>
-              <th><input data-filter="status" oninput="applyTable()" placeholder="Фильтр" /></th>
-              <th><input data-filter="expires" oninput="applyTable()" placeholder="Фильтр" /></th>
-              <th><input data-filter="installed" oninput="applyTable()" placeholder="Фильтр" /></th>
-              <th>
-                <select data-filter="legacy" onchange="applyTable()">
-                  <option value="">Все</option>
-                  <option value="да">Да</option>
-                  <option value="нет">Нет</option>
-                </select>
-              </th>
+            <tr class="filters">
+              <th><select data-filter="crm" onchange="applyTable()"><option value="">Все</option><option value="amo">amo</option></select></th>
+              <th><input data-filter="domain" oninput="applyTable()" placeholder="Домен" /></th>
+              <th><input data-filter="client" oninput="applyTable()" placeholder="Клиент" /></th>
+              <th><input data-filter="licenses" oninput="applyTable()" placeholder="Лицензии" /></th>
+              <th><input data-filter="widget" oninput="applyTable()" placeholder="Виджет" /></th>
+              <th><input data-filter="status" oninput="applyTable()" placeholder="Статус" /></th>
+              <th><input data-filter="expires" oninput="applyTable()" placeholder="Дата" /></th>
+              <th><input data-filter="installed" oninput="applyTable()" placeholder="Дата" /></th>
+              <th><select data-filter="legacy" onchange="applyTable()"><option value="">Все</option><option value="да">Да</option><option value="нет">Нет</option></select></th>
               <th></th>
             </tr>
           </thead>
-          <tbody>
-            <tr><td colspan="10"><div class="state"><div class="skeleton"></div></div></td></tr>
-          </tbody>
+          <tbody><tr><td colspan="10"><div class="state"><div class="skeleton"></div></div></td></tr></tbody>
         </table>
       </div>
     </section>
@@ -1351,25 +1362,14 @@ export class BillingService {
       <div class="panel-head">
         <div>
           <h2>Ключи приватных интеграций</h2>
-          <div class="subtitle">Секрет хранится зашифрованно и не показывается после сохранения.</div>
+          <div class="subtitle">Технический блок ниже кабинета. Адрес возврата берётся из настроек сервера.</div>
         </div>
         <button class="secondary" onclick="loadIntegrations()">Обновить список</button>
       </div>
       <div class="table-wrap">
-        <table id="integrationsTable" style="min-width:860px">
-          <thead>
-            <tr>
-              <th>Виджет</th>
-              <th>Домен</th>
-              <th>Widget code</th>
-              <th>Client ID</th>
-              <th>Redirect URI</th>
-              <th>Обновлено</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr><td colspan="6"><div class="state">Загрузка...</div></td></tr>
-          </tbody>
+        <table id="integrationsTable" style="min-width:820px">
+          <thead><tr><th>Виджет</th><th>Домен</th><th>Widget code</th><th>Client ID</th><th>Обновлено</th></tr></thead>
+          <tbody><tr><td colspan="5"><div class="state">Загрузка...</div></td></tr></tbody>
         </table>
       </div>
     </section>
@@ -1380,35 +1380,16 @@ export class BillingService {
       <div class="modal-head">
         <div>
           <h2>Добавить пользователя</h2>
-          <div class="subtitle">Выберите виджет и внесите ключи приватной интеграции.</div>
+          <div class="subtitle">Пока доступен один виджет. Введите домен, секрет, ID и widget code.</div>
         </div>
         <button class="modal-close" type="button" onclick="closeManualModal()">×</button>
       </div>
       <div class="grid">
-        <div>
-          <label for="manualWidget">Виджет</label>
-          <select id="manualWidget"></select>
-        </div>
-        <div>
-          <label for="manualDomain">Домен</label>
-          <input id="manualDomain" placeholder="company.amocrm.ru" />
-        </div>
-        <div>
-          <label for="manualClientId">ID</label>
-          <input id="manualClientId" placeholder="Client ID" required />
-        </div>
-        <div>
-          <label for="manualClientSecret">Секрет</label>
-          <input id="manualClientSecret" type="password" placeholder="Client Secret" required />
-        </div>
-        <div>
-          <label for="manualWidgetCode">Виджет код</label>
-          <input id="manualWidgetCode" placeholder="Widget code" required />
-        </div>
-        <div>
-          <label for="manualRedirectUri">Redirect URI</label>
-          <input id="manualRedirectUri" placeholder="По умолчанию из сервера" />
-        </div>
+        <div><label for="manualWidget">Виджет</label><select id="manualWidget"><option value="copy_leads">Копирование сделок</option></select></div>
+        <div><label for="manualDomain">Домен</label><input id="manualDomain" placeholder="subdomain или subdomain.amocrm.ru" /></div>
+        <div><label for="manualClientId">ID</label><input id="manualClientId" placeholder="Client ID" required /></div>
+        <div><label for="manualClientSecret">Секрет</label><input id="manualClientSecret" type="password" placeholder="Client Secret" required /></div>
+        <div><label for="manualWidgetCode">Виджет код</label><input id="manualWidgetCode" placeholder="Widget code" required /></div>
       </div>
       <div id="manualStatus" class="status-line"></div>
       <div class="modal-actions">
@@ -1419,27 +1400,24 @@ export class BillingService {
   </div>
 
   <script>
-    const state = {
-      accounts: [],
-      integrations: [],
-      expanded: {},
-      sortKey: 'domain',
-      sortDir: 'asc',
-      loadingAccounts: false
-    };
-
+    const state = { accounts: [], integrations: [], rows: [], expanded: {}, sortKey: 'expires', sortDir: 'asc', quickFilter: '', loadingAccounts: false };
     const sessionKey = 'simplesales_admin_session';
     const loginKey = 'simplesales_admin_login';
+    const widgetCatalog = [{ widgetSlug: 'copy_leads', widgetName: 'Копирование сделок' }];
 
-    function authHeaders(){
-      return { 'x-admin-session': localStorage.getItem(sessionKey) || '' };
-    }
+    function authHeaders(){ return { 'x-admin-session': localStorage.getItem(sessionKey) || '' }; }
+    function normalizeText(value){ return String(value == null ? '' : value).toLowerCase().trim(); }
+    function escapeHtml(value){ return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch){ return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[ch]; }); }
+    function cleanError(text){ try{ const parsed = JSON.parse(text || '{}'); return parsed.message || text; }catch(e){ return text || 'Ошибка'; } }
+    function setStatus(id,text,mode){ const el=document.getElementById(id); if(!el) return; el.textContent=text||''; el.className='status-line'+(mode?' '+mode:''); }
+    function isoToText(value){ if(!value) return '-'; const d=new Date(value); if(Number.isNaN(d.getTime())) return value; return d.toLocaleDateString('ru-RU',{timeZone:'Europe/Moscow'}); }
+    function dateValue(value){ if(!value) return 0; const d=new Date(value); return Number.isNaN(d.getTime()) ? 0 : d.getTime(); }
+    function shortDomain(value){ return String(value || '').replace(/^https?:\\/\\//i,'').replace(/\\/.*$/,'').replace(/\\.amocrm\\.ru$/i,'').replace(/\\.kommo\\.com$/i,'').replace(/\\.kommo\\.ru$/i,''); }
 
-    function setStatus(id, text, mode){
-      const el = document.getElementById(id);
-      if(!el) return;
-      el.textContent = text || '';
-      el.className = 'status-line' + (mode ? ' ' + mode : '');
+    async function apiFetch(url, options){
+      const res = await fetch(url, Object.assign({}, options || {}, { headers: Object.assign({}, authHeaders(), (options && options.headers) || {}) }));
+      if(res.status === 401){ logout(); throw new Error('Нужно войти заново'); }
+      return res;
     }
 
     function showSetup(login){
@@ -1448,31 +1426,36 @@ export class BillingService {
       document.getElementById('appView').classList.add('hidden');
       document.getElementById('setupLogin').value = login || 'admin';
     }
+    function showApp(){
+      document.getElementById('setupView').classList.add('hidden');
+      document.getElementById('loginView').classList.add('hidden');
+      document.getElementById('appView').classList.remove('hidden');
+    }
+    function logout(){
+      localStorage.removeItem(sessionKey);
+      document.getElementById('setupView').classList.add('hidden');
+      document.getElementById('appView').classList.add('hidden');
+      document.getElementById('loginView').classList.remove('hidden');
+      setStatus('loginStatus','','');
+    }
 
     async function checkSetup(){
       const res = await fetch('/billing/admin/setup-status');
-      if(!res.ok) return { needsSetup: false, login: 'admin' };
+      if(!res.ok) return { needsSetup:false, login:'admin' };
       return res.json();
     }
-
     async function submitSetupPassword(event){
-      if(event) event.preventDefault();
-      const button = document.getElementById('setupButton');
+      event.preventDefault();
       const login = document.getElementById('setupLogin').value.trim() || 'admin';
       const password = document.getElementById('setupPasswordInput').value.trim();
       const repeat = document.getElementById('setupPasswordRepeatInput').value.trim();
-      if(password !== repeat){
-        setStatus('setupStatus', 'Пароли не совпадают', 'error');
-        return;
-      }
+      if(password.length < 6){ setStatus('setupStatus','Пароль минимум 6 символов','error'); return; }
+      if(password !== repeat){ setStatus('setupStatus','Пароли не совпадают','error'); return; }
+      const button = document.getElementById('setupButton');
       button.disabled = true;
-      setStatus('setupStatus', 'Сохраняю...', '');
+      setStatus('setupStatus','Сохраняю...','');
       try{
-        const res = await fetch('/billing/admin/setup', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ login, password })
-        });
+        const res = await fetch('/billing/admin/setup',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ login, password }) });
         if(!res.ok) throw new Error(await res.text());
         const data = await res.json();
         localStorage.setItem(sessionKey, data.session);
@@ -1481,436 +1464,278 @@ export class BillingService {
         document.getElementById('setupPasswordRepeatInput').value = '';
         showApp();
         await loadAll();
-      }catch(e){
-        setStatus('setupStatus', cleanError(e.message), 'error');
-      }finally{
-        button.disabled = false;
-      }
+      }catch(e){ setStatus('setupStatus', cleanError(e.message), 'error'); }
+      finally{ button.disabled = false; }
     }
-
     async function submitLogin(event){
-      if(event) event.preventDefault();
-      const button = document.getElementById('loginButton');
-      button.disabled = true;
-      setStatus('loginStatus', 'Проверяю...', '');
+      event.preventDefault();
+      const button=document.getElementById('loginButton');
+      button.disabled=true;
+      setStatus('loginStatus','Проверяю...','');
       try{
-        const login = document.getElementById('adminLoginInput').value.trim();
-        const password = document.getElementById('adminPasswordInput').value.trim();
-        const res = await fetch('/billing/admin/login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ login, password })
-        });
+        const login=document.getElementById('adminLoginInput').value.trim();
+        const password=document.getElementById('adminPasswordInput').value.trim();
+        const res=await fetch('/billing/admin/login',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ login, password }) });
         if(!res.ok) throw new Error(await res.text());
-        const data = await res.json();
-        localStorage.setItem(sessionKey, data.session);
-        localStorage.setItem(loginKey, data.login || login);
+        const data=await res.json();
+        localStorage.setItem(sessionKey,data.session);
+        localStorage.setItem(loginKey,data.login||login);
         showApp();
         await loadAll();
-      }catch(e){
-        setStatus('loginStatus', cleanError(e.message), 'error');
-      }finally{
-        button.disabled = false;
-      }
+      }catch(e){ setStatus('loginStatus', cleanError(e.message), 'error'); }
+      finally{ button.disabled=false; }
     }
 
-    function logout(){
-      localStorage.removeItem(sessionKey);
-      document.getElementById('setupView').classList.add('hidden');
-      document.getElementById('appView').classList.add('hidden');
-      document.getElementById('loginView').classList.remove('hidden');
-      setStatus('loginStatus', '', '');
-    }
-
-    function showApp(){
-      document.getElementById('setupView').classList.add('hidden');
-      document.getElementById('loginView').classList.add('hidden');
-      document.getElementById('appView').classList.remove('hidden');
-    }
-
-    function cleanError(text){
-      try{
-        const parsed = JSON.parse(text || '{}');
-        return parsed.message || text;
-      }catch(e){
-        return text || 'Ошибка';
-      }
-    }
-
-    function isoToText(value){
-      if(!value) return '-';
-      const d = new Date(value);
-      if(Number.isNaN(d.getTime())) return value;
-      return d.toLocaleString('ru-RU', { timeZone: 'Europe/Moscow' });
-    }
-
-    function dateValue(value){
-      if(!value) return 0;
-      const d = new Date(value);
-      return Number.isNaN(d.getTime()) ? 0 : d.getTime();
-    }
-
-    function escapeHtml(value){
-      return String(value == null ? '' : value).replace(/[&<>"']/g, function(ch){
-        return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[ch];
-      });
-    }
-
-    function normalizeText(value){
-      return String(value == null ? '' : value).toLowerCase().trim();
-    }
-
-    async function apiFetch(url, options){
-      const res = await fetch(url, Object.assign({}, options || {}, {
-        headers: Object.assign({}, authHeaders(), (options && options.headers) || {})
-      }));
-      if(res.status === 401){
-        logout();
-        throw new Error('Нужно войти заново');
-      }
-      return res;
-    }
-
-    async function loadAll(){
-      await Promise.all([loadIntegrations(), loadAccounts()]);
-    }
-
+    async function loadAll(){ await Promise.all([loadIntegrations(), loadAccounts()]); }
     async function loadIntegrations(){
-      const tbody = document.querySelector('#integrationsTable tbody');
-      tbody.innerHTML = '<tr><td colspan="6"><div class="state">Загрузка...</div></td></tr>';
+      const tbody=document.querySelector('#integrationsTable tbody');
+      tbody.innerHTML='<tr><td colspan="5"><div class="state">Загрузка...</div></td></tr>';
       try{
-        const res = await apiFetch('/billing/admin/integrations');
+        const res=await apiFetch('/billing/admin/integrations');
         if(!res.ok) throw new Error(await res.text());
-        state.integrations = await res.json();
+        state.integrations=await res.json();
         renderIntegrations();
-        renderWidgetSelect();
-      }catch(e){
-        tbody.innerHTML = '<tr><td colspan="6"><div class="state">' + escapeHtml(cleanError(e.message)) + '</div></td></tr>';
-      }
+      }catch(e){ tbody.innerHTML='<tr><td colspan="5"><div class="state">'+escapeHtml(cleanError(e.message))+'</div></td></tr>'; }
     }
-
     function renderIntegrations(){
-      const tbody = document.querySelector('#integrationsTable tbody');
-      tbody.innerHTML = '';
-      if(!state.integrations.length){
-        tbody.innerHTML = '<tr><td colspan="6"><div class="state">Пока нет приватных интеграций.</div></td></tr>';
-        return;
-      }
+      const tbody=document.querySelector('#integrationsTable tbody');
+      tbody.innerHTML='';
+      if(!state.integrations.length){ tbody.innerHTML='<tr><td colspan="5"><div class="state">Пока нет приватных интеграций.</div></td></tr>'; return; }
       state.integrations.forEach(function(row){
-        const tr = document.createElement('tr');
-        tr.innerHTML =
-          '<td><b>' + escapeHtml(row.widgetName || '-') + '</b><div class="muted">' + escapeHtml(row.widgetSlug || '-') + '</div></td>' +
-          '<td>' + escapeHtml(row.amoDomain || '-') + '</td>' +
-          '<td>' + escapeHtml(row.widgetCode || '-') + '</td>' +
-          '<td>' + escapeHtml(row.amoClientId || '-') + '</td>' +
-          '<td>' + escapeHtml(row.redirectUri || '-') + '</td>' +
-          '<td>' + escapeHtml(isoToText(row.updatedAt)) + '</td>';
+        const tr=document.createElement('tr');
+        tr.innerHTML='<td><b>'+escapeHtml(row.widgetName||'-')+'</b><div class="micro">'+escapeHtml(row.widgetSlug||'-')+'</div></td>'+
+          '<td>'+escapeHtml(shortDomain(row.amoDomain||''))+'</td>'+
+          '<td>'+escapeHtml(row.widgetCode||'-')+'</td>'+
+          '<td>'+escapeHtml(row.amoClientId||'-')+'</td>'+
+          '<td>'+escapeHtml(isoToText(row.updatedAt))+'</td>';
         tbody.appendChild(tr);
       });
     }
-
-    function renderWidgetSelect(){
-      const select = document.getElementById('manualWidget');
-      const previous = select.value;
-      const options = state.integrations.length ? state.integrations : [{
-        widgetName: 'Копирование сделок',
-        widgetSlug: 'copy_leads',
-        widgetCode: ''
-      }];
-      select.innerHTML = options.map(function(item, index){
-        const value = item.widgetCode || 'new-' + index;
-        return '<option value="' + escapeHtml(value) + '">' + escapeHtml(item.widgetName || 'Копирование сделок') + '</option>';
-      }).join('');
-      if(previous) select.value = previous;
-    }
-
     async function loadAccounts(){
-      state.loadingAccounts = true;
+      state.loadingAccounts=true;
       document.getElementById('clientsError').classList.add('hidden');
-      document.querySelector('#clientsTable tbody').innerHTML = '<tr><td colspan="10"><div class="state"><div class="skeleton"></div></div></td></tr>';
+      document.querySelector('#clientsTable tbody').innerHTML='<tr><td colspan="10"><div class="state"><div class="skeleton"></div></div></td></tr>';
       try{
-        const res = await apiFetch('/billing/admin/accounts');
+        const res=await apiFetch('/billing/admin/accounts');
         if(!res.ok) throw new Error(await res.text());
-        state.accounts = await res.json();
-        state.loadingAccounts = false;
+        state.accounts=await res.json();
+        state.rows=flattenRows(state.accounts);
+        state.loadingAccounts=false;
         applyTable();
       }catch(e){
-        state.loadingAccounts = false;
-        document.querySelector('#clientsTable tbody').innerHTML = '';
-        const box = document.getElementById('clientsError');
-        box.textContent = cleanError(e.message);
+        state.loadingAccounts=false;
+        document.querySelector('#clientsTable tbody').innerHTML='';
+        const box=document.getElementById('clientsError');
+        box.textContent=cleanError(e.message);
         box.classList.remove('hidden');
       }
     }
 
-    function getClientAggregate(row){
-      const widgets = row.widgets || [];
-      const primary = widgets[0] || {};
-      const status = primary.status || {};
-      const installedAt = widgets.reduce(function(acc, widget){
-        const value = dateValue(widget.installedAt);
-        return !acc || (value && value < acc) ? value : acc;
-      }, 0);
-      const legacy = widgets.some(function(widget){ return Boolean(widget.isLegacy); });
-      return {
-        client: String(row.amoId || ''),
-        domain: row.domain || '',
-        users: String(row.usersCount || 0),
-        admin: [row.adminName, row.adminEmail, row.adminPhone].filter(Boolean).join(' '),
-        widgets: String(widgets.length || 0),
-        status: status.title || '-',
-        expires: isoToText(status.expiresAt),
-        expiresRaw: dateValue(status.expiresAt),
-        installed: installedAt ? isoToText(new Date(installedAt).toISOString()) : '-',
-        installedRaw: installedAt,
-        legacy: legacy ? 'да' : 'нет'
-      };
-    }
-
-    function collectSearchText(row){
-      const aggregate = getClientAggregate(row);
-      const widgetText = (row.widgets || []).map(function(widget){
-        return [
-          widget.widgetName,
-          widget.widgetSlug,
-          widget.amoClientId,
-          widget.status && widget.status.title,
-          isoToText(widget.status && widget.status.expiresAt),
-          isoToText(widget.installedAt),
-          widget.isLegacy ? 'да legacy' : 'нет',
-          widget.firstSeenSource
-        ].join(' ');
-      }).join(' ');
-      return normalizeText(Object.keys(aggregate).map(function(key){ return aggregate[key]; }).join(' ') + ' ' + widgetText);
-    }
-
-    function getFilters(){
-      const filters = {};
-      document.querySelectorAll('[data-filter]').forEach(function(input){
-        filters[input.dataset.filter] = normalizeText(input.value);
+    function flattenRows(accounts){
+      const rows=[];
+      (accounts||[]).forEach(function(client){
+        const widgets=client.widgets&&client.widgets.length?client.widgets:[{}];
+        widgets.forEach(function(widget){
+          const status=widget.status||{};
+          const row={
+            id: widget.id || client.amoId,
+            clientKey: String(client.amoId || client.domain || ''),
+            crm: widget.crm || client.crm || 'amo',
+            domain: widget.domainShort || client.domainShort || shortDomain(widget.domain || client.domain),
+            client: String(client.amoId || widget.amoId || ''),
+            adminName: widget.adminName || client.adminName || '',
+            adminEmail: widget.adminEmail || client.adminEmail || '',
+            adminPhone: widget.adminPhone || client.adminPhone || '',
+            licenses: Number(client.paidLicensesCount != null ? client.paidLicensesCount : client.usersCount || 0),
+            licenseSource: client.usersCountSource || 'stored',
+            widget: widget.widgetName || 'Копирование сделок',
+            widgetSlug: widget.widgetSlug || 'copy_leads',
+            status: status.title || '-',
+            statusState: status.state || '',
+            expires: isoToText(status.expiresAt),
+            expiresRaw: dateValue(status.expiresAt),
+            installed: isoToText(widget.installedAt),
+            installedRaw: dateValue(widget.installedAt),
+            legacy: widget.isLegacy ? 'да' : 'нет',
+            firstSeenSource: widget.firstSeenSource || '',
+            accountId: widget.id
+          };
+          row.search = normalizeText([row.crm,row.domain,row.client,row.adminName,row.adminEmail,row.adminPhone,row.licenses,row.widget,row.widgetSlug,row.status,row.expires,row.installed,row.legacy,row.firstSeenSource].join(' '));
+          rows.push(row);
+        });
       });
+      return rows;
+    }
+    function getFilters(){
+      const filters={};
+      document.querySelectorAll('[data-filter]').forEach(function(input){ filters[input.dataset.filter]=normalizeText(input.value); });
       return filters;
     }
-
+    function setQuickFilter(value){ state.quickFilter=value||''; applyTable(); }
+    function clearFilters(){
+      document.getElementById('globalSearch').value='';
+      document.querySelectorAll('[data-filter]').forEach(function(input){ input.value=''; });
+      state.quickFilter='';
+      applyTable();
+    }
+    function rowValue(row,key){
+      if(key==='expires') return row.expiresRaw;
+      if(key==='installed') return row.installedRaw;
+      if(key==='licenses') return row.licenses;
+      return row[key] || '';
+    }
     function applyTable(){
       if(state.loadingAccounts) return;
-      const global = normalizeText(document.getElementById('globalSearch').value);
-      const filters = getFilters();
-      let rows = (state.accounts || []).filter(function(row){
-        const aggregate = getClientAggregate(row);
-        if(global && !collectSearchText(row).includes(global)) return false;
+      const global=normalizeText(document.getElementById('globalSearch').value);
+      const filters=getFilters();
+      const now=Date.now();
+      const fourteenDays=14*24*60*60*1000;
+      let rows=(state.rows||[]).filter(function(row){
+        if(global && !row.search.includes(global)) return false;
+        if(state.quickFilter==='ending' && (!row.expiresRaw || row.expiresRaw < now || row.expiresRaw > now + fourteenDays)) return false;
         return Object.keys(filters).every(function(key){
           if(!filters[key]) return true;
-          return normalizeText(aggregate[key]).includes(filters[key]);
+          return normalizeText(String(rowValue(row,key))).includes(filters[key]);
         });
       });
       rows.sort(function(a,b){
-        const aa = getClientAggregate(a);
-        const bb = getClientAggregate(b);
-        let av = aa[state.sortKey];
-        let bv = bb[state.sortKey];
-        if(state.sortKey === 'expires'){
-          av = aa.expiresRaw;
-          bv = bb.expiresRaw;
-        }
-        if(state.sortKey === 'installed'){
-          av = aa.installedRaw;
-          bv = bb.installedRaw;
-        }
-        if(state.sortKey === 'users' || state.sortKey === 'widgets'){
-          av = Number(av || 0);
-          bv = Number(bv || 0);
-        }
-        if(typeof av === 'number' || typeof bv === 'number'){
-          return (Number(av || 0) - Number(bv || 0)) * (state.sortDir === 'asc' ? 1 : -1);
-        }
-        return String(av || '').localeCompare(String(bv || ''), 'ru') * (state.sortDir === 'asc' ? 1 : -1);
+        const av=rowValue(a,state.sortKey);
+        const bv=rowValue(b,state.sortKey);
+        if(typeof av==='number' || typeof bv==='number') return (Number(av||0)-Number(bv||0))*(state.sortDir==='asc'?1:-1);
+        return String(av||'').localeCompare(String(bv||''),'ru')*(state.sortDir==='asc'?1:-1);
       });
-      renderAccounts(rows);
+      updateKpis();
       updateSortMarks();
-      document.getElementById('clientsMeta').textContent = 'Показано ' + rows.length + ' из ' + state.accounts.length + '. Юзеры считаются по текущим платным лицензиям amoCRM.';
+      renderRows(rows);
+      document.getElementById('clientsMeta').textContent='Показано '+rows.length+' из '+state.rows.length+'. В колонке “Оплачено” — текущие платные лицензии amoCRM.';
     }
-
+    function updateKpis(){
+      const clients=new Set((state.rows||[]).map(function(row){ return row.clientKey; }));
+      const licensesByClient={};
+      let ending=0;
+      const now=Date.now();
+      const fourteenDays=14*24*60*60*1000;
+      (state.rows||[]).forEach(function(row){
+        licensesByClient[row.clientKey]=row.licenses;
+        if(row.expiresRaw && row.expiresRaw >= now && row.expiresRaw <= now + fourteenDays) ending += 1;
+      });
+      document.getElementById('kpiClients').textContent=clients.size;
+      document.getElementById('kpiWidgets').textContent=(state.rows||[]).length;
+      document.getElementById('kpiLicenses').textContent=Object.keys(licensesByClient).reduce(function(sum,key){ return sum + Number(licensesByClient[key]||0); },0);
+      document.getElementById('kpiEnding').textContent=ending;
+    }
     function setSort(key){
-      if(state.sortKey === key){
-        state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
-      }else{
-        state.sortKey = key;
-        state.sortDir = 'asc';
-      }
+      if(state.sortKey===key) state.sortDir=state.sortDir==='asc'?'desc':'asc';
+      else { state.sortKey=key; state.sortDir='asc'; }
       applyTable();
     }
-
     function updateSortMarks(){
-      ['client','domain','users','admin','widgets','status','expires','installed','legacy'].forEach(function(key){
-        const el = document.getElementById('sort-' + key);
-        if(el) el.textContent = state.sortKey === key ? (state.sortDir === 'asc' ? '↑' : '↓') : '';
+      ['crm','domain','client','licenses','widget','status','expires','installed','legacy'].forEach(function(key){
+        const el=document.getElementById('sort-'+key);
+        if(el) el.textContent=state.sortKey===key?(state.sortDir==='asc'?'↑':'↓'):'';
       });
     }
-
-    function statusPill(status){
-      const stateName = status && status.state;
-      const cls = stateName === 'paid' || stateName === 'trial' || stateName === 'grace'
-        ? 'green'
-        : stateName === 'paid_expired' || stateName === 'expired'
-          ? 'red'
-          : stateName === 'not_activated' || stateName === 'legacy_not_activated'
-            ? 'orange'
-            : 'gray';
-      return '<span class="pill ' + cls + '">' + escapeHtml(status && status.title || '-') + '</span>';
+    function statusPill(row){
+      const stateName=row.statusState;
+      const cls=(stateName==='paid'||stateName==='trial'||stateName==='grace')?'ok':(stateName==='paid_expired'||stateName==='expired')?'bad':(stateName==='not_activated'||stateName==='legacy_not_activated')?'warn':'gray';
+      return '<span class="pill '+cls+'">'+escapeHtml(row.status)+'</span>';
     }
-
-    function renderAccounts(rows){
-      const tbody = document.querySelector('#clientsTable tbody');
-      tbody.innerHTML = '';
-      if(!rows.length){
-        tbody.innerHTML = '<tr><td colspan="10"><div class="state">Ничего не найдено. Проверьте поиск или фильтры.</div></td></tr>';
-        return;
-      }
+    function renderRows(rows){
+      const tbody=document.querySelector('#clientsTable tbody');
+      tbody.innerHTML='';
+      if(!rows.length){ tbody.innerHTML='<tr><td colspan="10"><div class="state">Ничего не найдено. Измените поиск или фильтры.</div></td></tr>'; return; }
       rows.forEach(function(row){
-        const aggregate = getClientAggregate(row);
-        const key = String(row.amoId || row.domain || Math.random());
-        const widgets = row.widgets || [];
-        const opened = state.expanded[key] === true;
-        const tr = document.createElement('tr');
-        tr.className = 'client-row';
-        tr.innerHTML =
-          '<td><div class="client-title"><button class="chevron" data-key="' + escapeHtml(key) + '" onclick="toggleClientByButton(this)">' + (opened ? '⌄' : '›') + '</button>' + escapeHtml(row.amoId || '-') + '</div></td>' +
-          '<td><b>' + escapeHtml(row.domain || '-') + '</b></td>' +
-          '<td><span class="pill">' + escapeHtml(row.usersCount || 0) + '</span><div class="domain">' + (row.usersCountSource === 'amo' ? 'amoCRM' : 'сохранено') + '</div></td>' +
-          '<td><div>' + escapeHtml(row.adminName || '-') + '</div><div class="muted">' + escapeHtml(row.adminEmail || '-') + '</div><div class="muted">' + escapeHtml(row.adminPhone || '-') + '</div></td>' +
-          '<td><span class="pill">' + escapeHtml(widgets.length) + '</span></td>' +
-          '<td>' + statusPill(widgets[0] && widgets[0].status) + '</td>' +
-          '<td>' + escapeHtml(aggregate.expires) + '</td>' +
-          '<td>' + escapeHtml(aggregate.installed) + '</td>' +
-          '<td>' + escapeHtml(aggregate.legacy) + '</td>' +
-          '<td></td>';
+        const opened=state.expanded[row.clientKey]===true;
+        const tr=document.createElement('tr');
+        tr.innerHTML='<td><span class="pill amo">'+escapeHtml(row.crm)+'</span></td>'+
+          '<td><div class="domain-main">'+escapeHtml(row.domain||'-')+'</div><div class="micro">ID '+escapeHtml(row.client||'-')+'</div></td>'+
+          '<td><button class="secondary client-toggle" onclick="toggleClient(\\''+escapeHtml(row.clientKey)+'\\')">'+(opened?'−':'+')+'</button>'+escapeHtml(row.adminName||'Клиент')+'</td>'+
+          '<td><span class="pill">'+escapeHtml(row.licenses)+'</span><div class="micro">'+(row.licenseSource==='amo_paid'?'amoCRM':'сохранено')+'</div></td>'+
+          '<td><b>'+escapeHtml(row.widget)+'</b><div class="micro">'+escapeHtml(row.widgetSlug)+'</div></td>'+
+          '<td>'+statusPill(row)+'</td>'+
+          '<td>'+escapeHtml(row.expires)+'</td>'+
+          '<td>'+escapeHtml(row.installed)+'</td>'+
+          '<td>'+escapeHtml(row.legacy)+'<div class="micro">'+escapeHtml(row.firstSeenSource||'')+'</div></td>'+
+          '<td>'+extendCell(row)+'</td>';
         tbody.appendChild(tr);
         if(opened){
-          widgets.forEach(function(widget){
-            const wtr = document.createElement('tr');
-            wtr.className = 'widget-row';
-            wtr.innerHTML =
-              '<td><div class="widget-name">' + escapeHtml(widget.widgetName || '-') + '<div class="muted">' + escapeHtml(widget.widgetSlug || '-') + '</div></div></td>' +
-              '<td>' + escapeHtml(widget.domain || row.domain || '-') + '</td>' +
-              '<td>' + escapeHtml(widget.usersCount || row.usersCount || 0) + '</td>' +
-              '<td><div>' + escapeHtml(widget.adminName || row.adminName || '-') + '</div><div class="muted">' + escapeHtml(widget.adminEmail || row.adminEmail || '-') + '</div></td>' +
-              '<td>1</td>' +
-              '<td>' + statusPill(widget.status) + '</td>' +
-              '<td>' + escapeHtml(isoToText(widget.status && widget.status.expiresAt)) + '</td>' +
-              '<td>' + escapeHtml(isoToText(widget.installedAt)) + '</td>' +
-              '<td>' + (widget.isLegacy ? 'да' : 'нет') + '<div class="muted">' + escapeHtml(widget.firstSeenSource || '-') + '</div></td>' +
-              '<td><div class="actions"><input type="number" min="1" value="30" id="days-widget-' + widget.id + '" /><button onclick="extendWidget(' + widget.id + ')">Начислить</button></div></td>';
-            tbody.appendChild(wtr);
-          });
+          const details=document.createElement('tr');
+          details.className='details-row';
+          details.innerHTML='<td colspan="10"><div class="details-grid">'+
+            '<div><div class="detail-label">Админ</div><div>'+escapeHtml(row.adminName||'-')+'</div></div>'+
+            '<div><div class="detail-label">Email</div><div>'+escapeHtml(row.adminEmail||'-')+'</div></div>'+
+            '<div><div class="detail-label">Телефон</div><div>'+escapeHtml(row.adminPhone||'-')+'</div></div>'+
+            '<div><div class="detail-label">Домен</div><div>'+escapeHtml(row.domain||'-')+'</div></div>'+
+            '</div></td>';
+          tbody.appendChild(details);
         }
       });
     }
-
-    function toggleClient(key){
-      state.expanded[key] = state.expanded[key] !== true;
-      applyTable();
+    function extendCell(row){
+      if(!row.accountId) return '<span class="muted">Нет установки</span>';
+      return '<div class="extend"><input aria-label="Дней" type="number" min="1" value="30" id="days-widget-'+escapeHtml(row.accountId)+'" /><button onclick="extendWidget('+escapeHtml(row.accountId)+')">+ дни</button></div>';
     }
-
-    function toggleClientByButton(button){
-      toggleClient(button.dataset.key || '');
-    }
+    function toggleClient(key){ state.expanded[key]=state.expanded[key]!==true; applyTable(); }
 
     function openManualModal(){
-      renderWidgetSelect();
-      setStatus('manualStatus', '', '');
-      document.getElementById('manualClientSecret').value = '';
+      const select=document.getElementById('manualWidget');
+      select.innerHTML=widgetCatalog.map(function(item){ return '<option value="'+escapeHtml(item.widgetSlug)+'">'+escapeHtml(item.widgetName)+'</option>'; }).join('');
+      setStatus('manualStatus','','');
+      document.getElementById('manualClientSecret').value='';
       document.getElementById('manualModal').classList.add('open');
     }
-
     function closeManualModal(event){
       if(event && event.target.id !== 'manualModal') return;
       document.getElementById('manualModal').classList.remove('open');
     }
-
-    function selectedIntegration(){
-      const code = document.getElementById('manualWidget').value;
-      return state.integrations.find(function(item){ return item.widgetCode === code; }) || null;
-    }
-
     async function saveManualUser(event){
       event.preventDefault();
-      const button = document.getElementById('manualSaveButton');
-      button.disabled = true;
-      setStatus('manualStatus', 'Сохраняю...', '');
-      const selected = selectedIntegration();
-      const payload = {
-        widgetName: selected && selected.widgetName || 'Копирование сделок',
-        widgetSlug: selected && selected.widgetSlug || 'copy_leads',
-        amoDomain: document.getElementById('manualDomain').value.trim(),
-        widgetCode: document.getElementById('manualWidgetCode').value.trim(),
-        clientId: document.getElementById('manualClientId').value.trim(),
-        clientSecret: document.getElementById('manualClientSecret').value.trim(),
-        redirectUri: document.getElementById('manualRedirectUri').value.trim()
+      const button=document.getElementById('manualSaveButton');
+      button.disabled=true;
+      setStatus('manualStatus','Сохраняю...','');
+      const selected=widgetCatalog[0];
+      const payload={
+        widgetName:selected.widgetName,
+        widgetSlug:selected.widgetSlug,
+        amoDomain:document.getElementById('manualDomain').value.trim(),
+        widgetCode:document.getElementById('manualWidgetCode').value.trim(),
+        clientId:document.getElementById('manualClientId').value.trim(),
+        clientSecret:document.getElementById('manualClientSecret').value.trim()
       };
       try{
-        const res = await apiFetch('/billing/admin/integrations', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
+        const res=await apiFetch('/billing/admin/integrations',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
         if(!res.ok) throw new Error(await res.text());
-        setStatus('manualStatus', 'Сохранено', 'ok');
+        setStatus('manualStatus','Сохранено','ok');
         await loadIntegrations();
         closeManualModal();
-      }catch(e){
-        setStatus('manualStatus', cleanError(e.message), 'error');
-      }finally{
-        button.disabled = false;
-      }
+      }catch(e){ setStatus('manualStatus',cleanError(e.message),'error'); }
+      finally{ button.disabled=false; }
     }
-
     async function extendWidget(accountId){
-      const daysInput = document.getElementById('days-widget-' + accountId);
-      const days = Number(daysInput && daysInput.value || 0);
-      const res = await apiFetch('/billing/admin/widget/' + accountId + '/extend', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ days: days })
-      });
-      if(!res.ok){
-        alert('Ошибка: ' + cleanError(await res.text()));
-        return;
-      }
+      const input=document.getElementById('days-widget-'+accountId);
+      const days=Number(input && input.value || 0);
+      if(!Number.isFinite(days) || days < 1){ alert('Введите количество дней'); return; }
+      const res=await apiFetch('/billing/admin/widget/'+accountId+'/extend',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ days:days }) });
+      if(!res.ok){ alert('Ошибка: '+cleanError(await res.text())); return; }
       await loadAccounts();
     }
-
     async function testTelegram(){
-      const res = await apiFetch('/billing/admin/test-telegram');
-      const text = await res.text();
-      if(!res.ok){
-        alert('Ошибка Telegram-теста: ' + cleanError(text));
-        return;
-      }
-      try {
-        const data = JSON.parse(text);
-        alert(data.message || 'Готово');
-      } catch (e) {
-        alert(text || 'Готово');
-      }
+      const res=await apiFetch('/billing/admin/test-telegram');
+      const text=await res.text();
+      if(!res.ok){ alert('Ошибка Telegram-теста: '+cleanError(text)); return; }
+      try{ const data=JSON.parse(text); alert(data.message || 'Готово'); }catch(e){ alert(text || 'Готово'); }
     }
 
     (async function boot(){
-      const savedLogin = localStorage.getItem(loginKey);
-      if(savedLogin) document.getElementById('adminLoginInput').value = savedLogin;
-      const setup = await checkSetup();
-      if(setup.needsSetup){
-        localStorage.removeItem(sessionKey);
-        showSetup(setup.login);
-        return;
-      }
-      if(localStorage.getItem(sessionKey)){
-        showApp();
-        loadAll();
-      }
+      const savedLogin=localStorage.getItem(loginKey);
+      if(savedLogin) document.getElementById('adminLoginInput').value=savedLogin;
+      const setup=await checkSetup();
+      if(setup.needsSetup){ localStorage.removeItem(sessionKey); showSetup(setup.login); return; }
+      if(localStorage.getItem(sessionKey)){ showApp(); await loadAll(); }
     })();
   </script>
 </body>
 </html>`;
   }
+
 }
