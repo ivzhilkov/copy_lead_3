@@ -16,6 +16,7 @@ export type AmoIntegrationCredentials = {
   amoClientId: string;
   amoClientSecret: string;
   redirectUri: string;
+  amoDomain?: string | null;
   widgetSlug: string;
   widgetName: string;
 };
@@ -49,6 +50,7 @@ export class AccountsService {
       amoClientId,
       amoClientSecret,
       redirectUri,
+      amoDomain: null,
       widgetSlug: 'copy_leads',
       widgetName: 'Копирование сделок',
     };
@@ -196,6 +198,10 @@ export class AccountsService {
         data.redirectUri ||
         current?.redirectUri ||
         this.configService.get<string>('redirectUri'),
+      amoDomain:
+        data.amoDomain !== undefined
+          ? normalizeAmoDomain(data.amoDomain)
+          : current?.amoDomain || null,
     });
   }
 
@@ -339,6 +345,7 @@ export class AccountsService {
       amoClientSecret: integration.amoClientSecret,
       redirectUri:
         integration.redirectUri || this.configService.get<string>('redirectUri'),
+      amoDomain: integration.amoDomain || null,
       widgetSlug: integration.widgetSlug || 'copy_leads',
       widgetName: integration.widgetName || 'Копирование сделок',
     };

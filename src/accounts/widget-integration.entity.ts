@@ -35,6 +35,9 @@ export class WidgetIntegration {
   @Column({ nullable: true })
   redirectUri?: string | null;
 
+  @Column({ nullable: true })
+  amoDomain?: string | null;
+
   @Column({ type: 'boolean', default: false })
   isDefault: boolean;
 
