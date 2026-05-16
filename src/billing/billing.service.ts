@@ -1242,7 +1242,7 @@ export class BillingService {
 </head>
 <body>
   <section id="setupView" class="login-wrap hidden">
-    <form class="login" onsubmit="setupPassword(event)">
+    <form class="login" onsubmit="submitSetupPassword(event)">
       <h1>Задайте пароль</h1>
       <div class="subtitle">Это первый вход. Пароль сохранится для следующих входов в админку.</div>
       <div class="field">
@@ -1250,12 +1250,12 @@ export class BillingService {
         <input id="setupLogin" autocomplete="username" value="admin" />
       </div>
       <div class="field">
-        <label for="setupPassword">Новый пароль</label>
-        <input id="setupPassword" type="password" autocomplete="new-password" />
+        <label for="setupPasswordInput">Новый пароль</label>
+        <input id="setupPasswordInput" type="password" autocomplete="new-password" />
       </div>
       <div class="field">
-        <label for="setupPasswordRepeat">Повторите пароль</label>
-        <input id="setupPasswordRepeat" type="password" autocomplete="new-password" />
+        <label for="setupPasswordRepeatInput">Повторите пароль</label>
+        <input id="setupPasswordRepeatInput" type="password" autocomplete="new-password" />
       </div>
       <div class="login-actions">
         <div id="setupStatus" class="status-line"></div>
@@ -1265,16 +1265,16 @@ export class BillingService {
   </section>
 
   <section id="loginView" class="login-wrap">
-    <form class="login" onsubmit="login(event)">
+    <form class="login" onsubmit="submitLogin(event)">
       <h1>SimpleSales Admin</h1>
       <div class="subtitle">Вход в кабинет управления клиентами и приватными виджетами.</div>
       <div class="field">
-        <label for="login">Логин</label>
-        <input id="login" autocomplete="username" />
+        <label for="adminLoginInput">Логин</label>
+        <input id="adminLoginInput" autocomplete="username" />
       </div>
       <div class="field">
-        <label for="password">Пароль</label>
-        <input id="password" type="password" autocomplete="current-password" />
+        <label for="adminPasswordInput">Пароль</label>
+        <input id="adminPasswordInput" type="password" autocomplete="current-password" />
       </div>
       <div class="login-actions">
         <div id="loginStatus" class="status-line"></div>
@@ -1455,12 +1455,12 @@ export class BillingService {
       return res.json();
     }
 
-    async function setupPassword(event){
+    async function submitSetupPassword(event){
       if(event) event.preventDefault();
       const button = document.getElementById('setupButton');
       const login = document.getElementById('setupLogin').value.trim() || 'admin';
-      const password = document.getElementById('setupPassword').value.trim();
-      const repeat = document.getElementById('setupPasswordRepeat').value.trim();
+      const password = document.getElementById('setupPasswordInput').value.trim();
+      const repeat = document.getElementById('setupPasswordRepeatInput').value.trim();
       if(password !== repeat){
         setStatus('setupStatus', 'Пароли не совпадают', 'error');
         return;
@@ -1477,8 +1477,8 @@ export class BillingService {
         const data = await res.json();
         localStorage.setItem(sessionKey, data.session);
         localStorage.setItem(loginKey, data.login || login);
-        document.getElementById('setupPassword').value = '';
-        document.getElementById('setupPasswordRepeat').value = '';
+        document.getElementById('setupPasswordInput').value = '';
+        document.getElementById('setupPasswordRepeatInput').value = '';
         showApp();
         await loadAll();
       }catch(e){
@@ -1488,14 +1488,14 @@ export class BillingService {
       }
     }
 
-    async function login(event){
+    async function submitLogin(event){
       if(event) event.preventDefault();
       const button = document.getElementById('loginButton');
       button.disabled = true;
       setStatus('loginStatus', 'Проверяю...', '');
       try{
-        const login = document.getElementById('login').value.trim();
-        const password = document.getElementById('password').value.trim();
+        const login = document.getElementById('adminLoginInput').value.trim();
+        const password = document.getElementById('adminPasswordInput').value.trim();
         const res = await fetch('/billing/admin/login', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1897,7 +1897,7 @@ export class BillingService {
 
     (async function boot(){
       const savedLogin = localStorage.getItem(loginKey);
-      if(savedLogin) document.getElementById('login').value = savedLogin;
+      if(savedLogin) document.getElementById('adminLoginInput').value = savedLogin;
       const setup = await checkSetup();
       if(setup.needsSetup){
         localStorage.removeItem(sessionKey);
