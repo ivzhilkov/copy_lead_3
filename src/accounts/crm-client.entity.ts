@@ -36,6 +36,9 @@ export class CrmClient {
   @Column({ type: 'int', default: 0 })
   usersCount: number;
 
+  @Column({ type: 'datetime', nullable: true })
+  pendingInstallNotifiedAt?: Date | null;
+
   @CreateDateColumn()
   createdAt: Date;
 

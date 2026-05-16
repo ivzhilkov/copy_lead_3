@@ -584,7 +584,7 @@ export class BillingService {
     profile?: PublicProfilePayload,
   ) {
     const normalized = this.serializeProfile(profile);
-    if (normalized.isAmoAdmin || normalized.userRank === 'master') return;
+    if (normalized.isAmoAdmin) return;
 
     if (normalized.userId) {
       try {
@@ -628,23 +628,29 @@ export class BillingService {
     );
 
     if (!account) {
-      await this.upsertPendingClient(payload.accountId, payload.profile);
+      const pendingClient = await this.upsertPendingClient(payload.accountId, payload.profile);
       const normalized = this.serializeProfile(payload.profile);
-      await this.sendTelegramMessage(
-        [
-          '🚀 Новая установка виджета Копирование сделок!',
-          '',
-          `🌐 Домен: ${normalized.domain}`,
-          `📧 Email: ${normalized.email}`,
-          `📱 Телефон: ${normalized.phone}`,
-          `👤 Пользователь: ${normalized.userName}`,
-          `🏢 Account ID: ${payload.accountId}`,
-          '',
-          'OAuth-авторизация еще не завершена.',
-          '',
-          `⏰ ${this.getMskTimestamp()}`,
-        ].join('\n'),
-      );
+      if (pendingClient && !pendingClient.pendingInstallNotifiedAt) {
+        await this.sendTelegramMessage(
+          [
+            '🚀 Новая установка виджета Копирование сделок!',
+            '',
+            `🌐 Домен: ${normalized.domain}`,
+            `📧 Email: ${normalized.email}`,
+            `📱 Телефон: ${normalized.phone}`,
+            `👤 Пользователь: ${normalized.userName}`,
+            `🏢 Account ID: ${payload.accountId}`,
+            '',
+            'OAuth-авторизация еще не завершена.',
+            '',
+            `⏰ ${this.getMskTimestamp()}`,
+          ].join('\n'),
+        );
+        await this.accountsService.upsertClient({
+          ...pendingClient,
+          pendingInstallNotifiedAt: this.getNow(),
+        });
+      }
       return this.toPendingAccountView();
     }
 
