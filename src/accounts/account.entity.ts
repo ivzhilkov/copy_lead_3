@@ -99,6 +99,27 @@ export class Account {
   @Column({ nullable: true })
   trialRequestedPhone?: string | null;
 
+  @Column({ nullable: true })
+  billingInn?: string | null;
+
+  @Column({ nullable: true })
+  billingLegalName?: string | null;
+
+  @Column({ nullable: true })
+  billingOgrn?: string | null;
+
+  @Column({ nullable: true })
+  latestInvoiceNumber?: string | null;
+
+  @Column({ nullable: true })
+  latestInvoiceStatus?: string | null;
+
+  @Column({ type: 'datetime', nullable: true })
+  latestInvoiceCreatedAt?: Date | null;
+
+  @Column({ type: 'datetime', nullable: true })
+  latestInvoicePaidAt?: Date | null;
+
   @Column({ type: 'datetime', nullable: true })
   paidUntil?: Date | null;
 

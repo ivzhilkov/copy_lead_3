@@ -75,6 +75,13 @@ type CreateInvoicePayload = {
   profile?: PublicProfilePayload;
 };
 
+type LookupCompanyPayload = {
+  accountId: number;
+  widgetCode: string;
+  inn?: string;
+  profile?: PublicProfilePayload;
+};
+
 type AdminLoginPayload = {
   login?: string;
   password?: string;
@@ -99,6 +106,13 @@ type LicenseView = {
   graceExtensionUsed: boolean;
   isLegacy: boolean;
   firstSeenSource: string | null;
+  clientEmail: string | null;
+  clientPhone: string | null;
+  billingInn: string | null;
+  billingLegalName: string | null;
+  billingOgrn: string | null;
+  latestInvoiceNumber: string | null;
+  latestInvoiceStatus: string | null;
 };
 
 type PaidLicensesCacheEntry = {
@@ -346,6 +360,7 @@ export class BillingService {
 
   private toPublicLicenseView(account: Account): LicenseView {
     const { state, expiresAt } = this.calculateState(account);
+    const contact = this.getPublicLicenseContact(account);
 
     if (state === 'paid') {
       return {
@@ -362,6 +377,7 @@ export class BillingService {
         graceExtensionUsed: Boolean(account?.graceExtensionUsed),
         isLegacy: Boolean(account?.isLegacy),
         firstSeenSource: account?.firstSeenSource || null,
+        ...contact,
       };
     }
 
@@ -380,6 +396,7 @@ export class BillingService {
         graceExtensionUsed: Boolean(account?.graceExtensionUsed),
         isLegacy: Boolean(account?.isLegacy),
         firstSeenSource: account?.firstSeenSource || null,
+        ...contact,
       };
     }
 
@@ -398,6 +415,7 @@ export class BillingService {
         graceExtensionUsed: Boolean(account?.graceExtensionUsed),
         isLegacy: Boolean(account?.isLegacy),
         firstSeenSource: account?.firstSeenSource || null,
+        ...contact,
       };
     }
 
@@ -416,6 +434,7 @@ export class BillingService {
         graceExtensionUsed: Boolean(account?.graceExtensionUsed),
         isLegacy: Boolean(account?.isLegacy),
         firstSeenSource: account?.firstSeenSource || null,
+        ...contact,
       };
     }
 
@@ -434,6 +453,7 @@ export class BillingService {
         graceExtensionUsed: Boolean(account?.graceExtensionUsed),
         isLegacy: Boolean(account?.isLegacy),
         firstSeenSource: account?.firstSeenSource || null,
+        ...contact,
       };
     }
 
@@ -453,6 +473,19 @@ export class BillingService {
       graceExtensionUsed: Boolean(account?.graceExtensionUsed),
       isLegacy: Boolean(account?.isLegacy),
       firstSeenSource: account?.firstSeenSource || null,
+      ...contact,
+    };
+  }
+
+  private getPublicLicenseContact(account?: Account | null) {
+    return {
+      clientEmail: account?.trialRequestedEmail || account?.adminEmail || null,
+      clientPhone: account?.trialRequestedPhone || account?.adminPhone || null,
+      billingInn: account?.billingInn || null,
+      billingLegalName: account?.billingLegalName || null,
+      billingOgrn: account?.billingOgrn || null,
+      latestInvoiceNumber: account?.latestInvoiceNumber || null,
+      latestInvoiceStatus: account?.latestInvoiceStatus || null,
     };
   }
 
@@ -474,6 +507,13 @@ export class BillingService {
       graceExtensionUsed: false,
       isLegacy: Boolean(client?.isLegacy),
       firstSeenSource: client?.firstSeenSource || null,
+      clientEmail: null,
+      clientPhone: null,
+      billingInn: null,
+      billingLegalName: null,
+      billingOgrn: null,
+      latestInvoiceNumber: null,
+      latestInvoiceStatus: null,
     };
   }
 
@@ -753,7 +793,7 @@ export class BillingService {
   }
 
   private buildPaymentQr(invoice: BillingInvoice, dateText: string) {
-    const purpose = `Оплата по Счет-оферта №${invoice.invoiceNumber} от ${dateText}. В том числе НДС 5%`;
+    const purpose = `Оплата по Счет-оферта №${invoice.invoiceNumber} от ${dateText}, amoCRM Account ID ${invoice.amoId}. В том числе НДС 5%`;
     return [
       'ST00012',
       'Name=ИП Жилков Иван Вячеславович',
@@ -780,7 +820,7 @@ export class BillingService {
     const dateText = this.getInvoiceDate(invoice.createdAt);
     const amount = this.formatRubles(invoice.amountKopecks);
     const vat = this.formatRubles(invoice.vatKopecks);
-    const purpose = `Оплата по Счет-оферта №${invoice.invoiceNumber} от ${dateText}. В том числе НДС 5%`;
+    const purpose = `Оплата по Счет-оферта №${invoice.invoiceNumber} от ${dateText}, amoCRM Account ID ${invoice.amoId}. В том числе НДС 5%`;
     const licensee = [
       invoice.legalName,
       `ИНН: ${invoice.inn}`,
@@ -858,6 +898,7 @@ export class BillingService {
             body: [
               [{ text: 'Лицензиар:', style: 'label' }, 'ИП Жилков Иван Вячеславович, ИНН 667116903111, г. Курган'],
               [{ text: 'Лицензиат:', style: 'label' }, licensee],
+              [{ text: 'ID аккаунта:', style: 'label' }, String(invoice.amoId)],
               [{ text: 'Основание:', style: 'label' }, 'Основной'],
             ],
           },
@@ -1137,7 +1178,11 @@ export class BillingService {
     let updated = profileUpdated;
     let extended = false;
 
-    if (statusBefore.isExpired && !profileUpdated.graceExtensionUsed) {
+    if (
+      payload.source === 'manual_copy' &&
+      statusBefore.state === 'expired' &&
+      !profileUpdated.graceExtensionUsed
+    ) {
       extended = true;
       updated = await this.accountsService.update(profileUpdated.id, {
         graceExtendedUntil: new Date(now.getTime() + 24 * 60 * 60 * 1000),
@@ -1179,6 +1224,42 @@ export class BillingService {
       message: extended
         ? 'Мы продлили виджет на 1 день и скоро с вами свяжемся для оплаты.'
         : 'Запрос на оплату отправлен, скоро с вами свяжемся.',
+    };
+  }
+
+  async lookupCompanyByInn(payload: LookupCompanyPayload) {
+    const inn = this.normalizeInn(payload.inn);
+    if (!/^\d{10}$|^\d{12}$/.test(inn)) {
+      throw new BadRequestException({
+        code: 'invalid_inn',
+        message: 'Введите корректный ИНН: 10 или 12 цифр.',
+      });
+    }
+
+    const account = await this.getAccountOrNull(
+      payload.accountId,
+      payload.widgetCode,
+    );
+    if (!account) {
+      await this.upsertPendingClient(payload.accountId, payload.profile, {
+        firstSeenSource: 'settings',
+      });
+      throw new BadRequestException({
+        code: 'not_authorized',
+        message:
+          'Сначала нужно завершить авторизацию виджета в amoCRM, затем можно скачать счёт.',
+      });
+    }
+
+    const profileUpdated = await this.upsertProfile(account, payload.profile);
+    await this.ensureAmoAdminOrThrow(profileUpdated, payload.profile);
+
+    const company = await this.resolveCompanyByInn(inn);
+    return {
+      inn,
+      legalName: company.legalName,
+      ogrn: company.ogrn,
+      dadataStatus: company.status,
     };
   }
 
@@ -1240,6 +1321,27 @@ export class BillingService {
       vatKopecks: 47619,
       source: payload.source || 'settings',
       dadataStatus: company.status,
+      status: 'issued',
+    });
+
+    await this.accountsService.update(profileUpdated.id, {
+      billingInn: inn,
+      billingLegalName: company.legalName,
+      billingOgrn: company.ogrn,
+      trialRequestedEmail: email,
+      trialRequestedPhone: phone,
+      latestInvoiceNumber: invoice.invoiceNumber,
+      latestInvoiceStatus: invoice.status,
+      latestInvoiceCreatedAt: invoice.createdAt,
+      latestInvoicePaidAt: null,
+    });
+
+    await this.accountsService.upsertClient({
+      amoId: profileUpdated.amoId,
+      domain: profileUpdated.domain,
+      billingInn: inn,
+      billingLegalName: company.legalName,
+      billingOgrn: company.ogrn,
     });
 
     const buffer = await this.renderInvoicePdf(invoice);
@@ -1266,6 +1368,47 @@ export class BillingService {
       invoice,
       buffer,
       filename: `schet-${invoice.invoiceNumber}.pdf`,
+    };
+  }
+
+  async updateAdminInvoiceStatus(invoiceNumber: string, statusRaw: string) {
+    const invoiceNumberNormalized = String(invoiceNumber || '').trim();
+    const status = String(statusRaw || '').trim();
+    if (!invoiceNumberNormalized) {
+      throw new BadRequestException('Нужно передать номер счёта');
+    }
+    if (!['issued', 'paid'].includes(status)) {
+      throw new BadRequestException('Статус счёта должен быть issued или paid');
+    }
+
+    const invoice = await this.invoiceRepo.findOne({
+      where: { invoiceNumber: invoiceNumberNormalized },
+    } as any);
+    if (!invoice) {
+      throw new NotFoundException('Счёт не найден');
+    }
+
+    const paidAt = status === 'paid' ? invoice.paidAt || this.getNow() : null;
+    const saved = await this.invoiceRepo.save({
+      ...invoice,
+      status,
+      paidAt,
+    });
+
+    if (saved.accountId) {
+      const account = await this.accountsService.findById(saved.accountId);
+      if (account?.latestInvoiceNumber === saved.invoiceNumber) {
+        await this.accountsService.update(saved.accountId, {
+          latestInvoiceStatus: status,
+          latestInvoicePaidAt: paidAt,
+        });
+      }
+    }
+
+    return {
+      invoiceNumber: saved.invoiceNumber,
+      status: saved.status,
+      paidAt: this.toIso(saved.paidAt),
     };
   }
 
@@ -1465,6 +1608,9 @@ export class BillingService {
         adminName: client.adminName,
         adminEmail: client.adminEmail,
         adminPhone: client.adminPhone,
+        billingInn: client.billingInn,
+        billingLegalName: client.billingLegalName,
+        billingOgrn: client.billingOgrn,
         isLegacy: Boolean(client.isLegacy),
         firstSeenSource: client.firstSeenSource || null,
         paidLicensesCount,
@@ -1488,6 +1634,9 @@ export class BillingService {
         adminName: account.adminName,
         adminEmail: account.adminEmail,
         adminPhone: account.adminPhone,
+        billingInn: account.billingInn,
+        billingLegalName: account.billingLegalName,
+        billingOgrn: account.billingOgrn,
         paidLicensesCount,
         usersCount: paidLicensesCount,
         usersCountSource: liveUsersCount === null ? 'stored' : 'amo_paid_active',
@@ -1608,6 +1757,13 @@ export class BillingService {
       adminName: account.adminName,
       adminEmail: account.adminEmail,
       adminPhone: account.adminPhone,
+      billingInn: account.billingInn,
+      billingLegalName: account.billingLegalName,
+      billingOgrn: account.billingOgrn,
+      latestInvoiceNumber: account.latestInvoiceNumber,
+      latestInvoiceStatus: account.latestInvoiceStatus,
+      latestInvoiceCreatedAt: this.toIso(account.latestInvoiceCreatedAt),
+      latestInvoicePaidAt: this.toIso(account.latestInvoicePaidAt),
       usersCount: account.usersCount || 0,
       installedAt: this.toIso(account.installedAt),
       isLegacy: Boolean(account.isLegacy),
@@ -2120,6 +2276,13 @@ export class BillingService {
             adminName: widget.adminName || client.adminName || '',
             adminEmail: widget.adminEmail || client.adminEmail || '',
             adminPhone: widget.adminPhone || client.adminPhone || '',
+            billingInn: widget.billingInn || client.billingInn || '',
+            billingLegalName: widget.billingLegalName || client.billingLegalName || '',
+            billingOgrn: widget.billingOgrn || client.billingOgrn || '',
+            latestInvoiceNumber: widget.latestInvoiceNumber || '',
+            latestInvoiceStatus: widget.latestInvoiceStatus || '',
+            latestInvoiceCreatedAt: widget.latestInvoiceCreatedAt || '',
+            latestInvoicePaidAt: widget.latestInvoicePaidAt || '',
             licenses: Number(client.paidLicensesCount != null ? client.paidLicensesCount : client.usersCount || 0),
             licenseSource: client.usersCountSource || 'stored',
             widget: widget.widgetName || 'Копирование сделок',
@@ -2135,7 +2298,7 @@ export class BillingService {
             firstSeenSource: firstSeenSource,
             accountId: widget.id
           };
-          row.search = normalizeText([row.crm,row.domain,row.client,row.adminName,row.adminEmail,row.adminPhone,row.licenses,row.widget,row.widgetSlug,row.status,row.expires,row.installed,row.legacy,row.firstSeenSource].join(' '));
+          row.search = normalizeText([row.crm,row.domain,row.client,row.adminName,row.adminEmail,row.adminPhone,row.billingInn,row.billingLegalName,row.latestInvoiceNumber,row.latestInvoiceStatus,row.licenses,row.widget,row.widgetSlug,row.status,row.expires,row.installed,row.legacy,row.firstSeenSource].join(' '));
           rows.push(row);
         });
       });
@@ -2227,7 +2390,7 @@ export class BillingService {
           '<td><button class="secondary client-toggle" onclick="toggleClient(\\''+escapeHtml(row.clientKey)+'\\')">'+(opened?'−':'+')+'</button>'+escapeHtml(row.adminName||'Клиент')+'</td>'+
           '<td><span class="pill">'+escapeHtml(row.licenses)+'</span><div class="micro">'+(row.licenseSource==='amo_paid_active'?'amoCRM':'сохранено')+'</div></td>'+
           '<td><b>'+escapeHtml(row.widget)+'</b><div class="micro">'+escapeHtml(row.widgetSlug)+'</div></td>'+
-          '<td>'+statusPill(row)+'</td>'+
+          '<td>'+statusPill(row)+invoiceSummary(row)+'</td>'+
           '<td>'+escapeHtml(row.expires)+'</td>'+
           '<td>'+escapeHtml(row.installed)+'</td>'+
           '<td>'+escapeHtml(row.legacy)+'<div class="micro">'+escapeHtml(row.firstSeenSource||'')+'</div></td>'+
@@ -2241,10 +2404,36 @@ export class BillingService {
             '<div><div class="detail-label">Email</div><div>'+escapeHtml(row.adminEmail||'-')+'</div></div>'+
             '<div><div class="detail-label">Телефон</div><div>'+escapeHtml(row.adminPhone||'-')+'</div></div>'+
             '<div><div class="detail-label">Домен</div><div>'+escapeHtml(row.domain||'-')+'</div></div>'+
+            '<div><div class="detail-label">Юрлицо</div><div>'+escapeHtml(row.billingLegalName||'-')+'</div><div class="micro">ИНН '+escapeHtml(row.billingInn||'-')+(row.billingOgrn ? ', ОГРН '+escapeHtml(row.billingOgrn) : '')+'</div></div>'+
+            '<div><div class="detail-label">Счёт</div>'+invoiceControls(row)+'</div>'+
             '</div></td>';
           tbody.appendChild(details);
         }
       });
+    }
+    function invoiceStatusText(status){
+      if(status==='paid') return 'оплачен';
+      if(status==='issued') return 'выставлен';
+      return 'нет';
+    }
+    function invoiceSummary(row){
+      if(!row.latestInvoiceNumber) return '<div class="micro">Счёт: нет</div>';
+      return '<div class="micro">Счёт: '+escapeHtml(invoiceStatusText(row.latestInvoiceStatus))+' · '+escapeHtml(row.latestInvoiceNumber)+'</div>';
+    }
+    function invoiceControls(row){
+      if(!row.latestInvoiceNumber) return '<div>-</div>';
+      const options=[
+        ['issued','Выставлен'],
+        ['paid','Оплачен']
+      ].map(function(item){
+        return '<option value="'+item[0]+'" '+(row.latestInvoiceStatus===item[0]?'selected':'')+'>'+item[1]+'</option>';
+      }).join('');
+      return '<div><div>'+escapeHtml(row.latestInvoiceNumber)+'<div class="micro">Создан: '+escapeHtml(isoToText(row.latestInvoiceCreatedAt))+(row.latestInvoicePaidAt ? ' · оплачен: '+escapeHtml(isoToText(row.latestInvoicePaidAt)) : '')+'</div></div>'+
+        '<div class="license-actions">'+
+        '<select id="invoice-status-'+escapeHtml(row.latestInvoiceNumber)+'">'+options+'</select>'+
+        '<button onclick="saveInvoiceStatus(\\''+escapeHtml(row.latestInvoiceNumber)+'\\')">Сохранить</button>'+
+        '<button class="secondary" onclick="downloadInvoice(\\''+escapeHtml(row.latestInvoiceNumber)+'\\')">PDF</button>'+
+        '</div></div>';
     }
     function licenseControls(row){
       if(!row.accountId) return '<span class="muted">Нет установки</span>';
@@ -2309,6 +2498,25 @@ export class BillingService {
       const res=await apiFetch('/billing/admin/widget/'+accountId+'/extend',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ days:days }) });
       if(!res.ok){ alert('Ошибка: '+cleanError(await res.text())); return; }
       await loadAccounts();
+    }
+    async function saveInvoiceStatus(invoiceNumber){
+      const status=document.getElementById('invoice-status-'+invoiceNumber).value;
+      const res=await apiFetch('/billing/admin/invoice/'+encodeURIComponent(invoiceNumber),{ method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ status:status }) });
+      if(!res.ok){ alert(cleanError(await res.text())); return; }
+      await loadAccounts();
+    }
+    async function downloadInvoice(invoiceNumber){
+      const res=await apiFetch('/billing/admin/invoice/'+encodeURIComponent(invoiceNumber)+'/pdf');
+      if(!res.ok){ alert(cleanError(await res.text())); return; }
+      const blob=await res.blob();
+      const url=URL.createObjectURL(blob);
+      const link=document.createElement('a');
+      link.href=url;
+      link.download='schet-'+invoiceNumber+'.pdf';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      setTimeout(function(){ URL.revokeObjectURL(url); },1000);
     }
     async function saveWidgetLicense(accountId){
       const status=document.getElementById('status-widget-'+accountId).value;

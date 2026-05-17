@@ -121,6 +121,21 @@ export class BillingController {
     res.send(result.buffer);
   }
 
+  @Post('/public/company-by-inn')
+  async lookupCompanyByInn(
+    @Body('account_id') accountIdRaw: string | number,
+    @Body('widget_code') widgetCode: string,
+    @Body('inn') inn: string,
+    @Body('profile') profile: any,
+  ) {
+    return this.billingService.lookupCompanyByInn({
+      accountId: Number(accountIdRaw),
+      widgetCode,
+      inn,
+      profile,
+    });
+  }
+
   @Get('/admin/panel')
   @Header('Content-Type', 'text/html; charset=utf-8')
   adminPanel() {
@@ -228,6 +243,16 @@ export class BillingController {
       `attachment; filename="${result.filename}"`,
     );
     res.send(result.buffer);
+  }
+
+  @Patch('/admin/invoice/:invoiceNumber')
+  async updateAdminInvoiceStatus(
+    @Req() req: Request,
+    @Param('invoiceNumber') invoiceNumber: string,
+    @Body('status') status: string,
+  ) {
+    await this.ensureAdmin(req);
+    return this.billingService.updateAdminInvoiceStatus(invoiceNumber, status);
   }
 
   @Post('/admin/account/:amoId/extend')

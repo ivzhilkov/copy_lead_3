@@ -45,6 +45,15 @@ export class CrmClient {
   @Column({ nullable: true })
   firstSeenSource?: string | null;
 
+  @Column({ nullable: true })
+  billingInn?: string | null;
+
+  @Column({ nullable: true })
+  billingLegalName?: string | null;
+
+  @Column({ nullable: true })
+  billingOgrn?: string | null;
+
   @CreateDateColumn()
   createdAt: Date;
 

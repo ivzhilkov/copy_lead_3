@@ -56,6 +56,12 @@ export class BillingInvoice {
   @Column({ nullable: true })
   dadataStatus?: string | null;
 
+  @Column({ default: 'issued' })
+  status: string;
+
+  @Column({ type: 'datetime', nullable: true })
+  paidAt?: Date | null;
+
   @CreateDateColumn()
   createdAt: Date;
 
