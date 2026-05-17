@@ -91,6 +91,37 @@ export class BillingController {
     });
   }
 
+  @Post('/public/uninstall')
+  async uninstallWidget(
+    @Body() body: any,
+    @Query() query: any,
+  ) {
+    return this.billingService.trackUninstall({
+      accountId:
+        body?.account_id ||
+        body?.accountId ||
+        body?.account?.id ||
+        query?.account_id ||
+        query?.accountId,
+      widgetCode:
+        body?.widget_code ||
+        body?.widgetCode ||
+        body?.widget?.code ||
+        body?.widget_info?.code ||
+        query?.widget_code ||
+        query?.widgetCode,
+      domain:
+        body?.domain ||
+        body?.referer ||
+        body?.account?.subdomain ||
+        body?.account?.domain ||
+        query?.domain ||
+        query?.referer,
+      profile: body?.profile,
+      raw: body,
+    });
+  }
+
   @Post('/public/invoice')
   async createInvoice(
     @Body('account_id') accountIdRaw: string | number,

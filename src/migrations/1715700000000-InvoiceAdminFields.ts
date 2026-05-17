@@ -20,6 +20,7 @@ export class InvoiceAdminFields1715700000000 implements MigrationInterface {
     await this.ensureColumn(queryRunner, 'billing_invoice', 'status', "varchar(255) NOT NULL DEFAULT 'issued'");
     await this.ensureColumn(queryRunner, 'billing_invoice', 'paidAt', 'datetime NULL');
 
+    await this.ensureColumn(queryRunner, 'account', 'uninstalledAt', 'datetime NULL');
     await this.ensureColumn(queryRunner, 'account', 'billingInn', 'varchar(255) NULL');
     await this.ensureColumn(queryRunner, 'account', 'billingLegalName', 'varchar(255) NULL');
     await this.ensureColumn(queryRunner, 'account', 'billingOgrn', 'varchar(255) NULL');
@@ -36,6 +37,7 @@ export class InvoiceAdminFields1715700000000 implements MigrationInterface {
   public async down(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query('ALTER TABLE billing_invoice DROP COLUMN paidAt');
     await queryRunner.query('ALTER TABLE billing_invoice DROP COLUMN status');
+    await queryRunner.query('ALTER TABLE account DROP COLUMN uninstalledAt');
     await queryRunner.query('ALTER TABLE account DROP COLUMN latestInvoicePaidAt');
     await queryRunner.query('ALTER TABLE account DROP COLUMN latestInvoiceCreatedAt');
     await queryRunner.query('ALTER TABLE account DROP COLUMN latestInvoiceStatus');

@@ -64,6 +64,9 @@ export class Account {
   installedAt?: Date | null;
 
   @Column({ type: 'datetime', nullable: true })
+  uninstalledAt?: Date | null;
+
+  @Column({ type: 'datetime', nullable: true })
   installNotifiedAt?: Date | null;
 
   @Column({ type: 'boolean', default: false })

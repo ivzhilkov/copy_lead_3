@@ -26,7 +26,8 @@ export type LicenseState =
   | 'paid'
   | 'grace'
   | 'paid_expired'
-  | 'expired';
+  | 'expired'
+  | 'uninstalled';
 
 export type PublicProfilePayload = {
   domain?: string;
@@ -64,6 +65,14 @@ type RequestPaymentPayload = {
   widgetCode: string;
   source?: 'settings' | 'manual_copy' | 'unknown';
   profile?: PublicProfilePayload;
+};
+
+type UninstallPayload = {
+  accountId?: number;
+  widgetCode?: string;
+  domain?: string;
+  profile?: PublicProfilePayload;
+  raw?: any;
 };
 
 type CreateInvoicePayload = {
@@ -309,6 +318,13 @@ export class BillingService {
 
   private calculateState(account: Account) {
     const now = this.getNow().getTime();
+    if (account?.uninstalledAt) {
+      return {
+        state: 'uninstalled' as LicenseState,
+        expiresAt: null,
+      };
+    }
+
     const paidUntil = account?.paidUntil
       ? new Date(account.paidUntil).getTime()
       : null;
@@ -428,6 +444,25 @@ export class BillingService {
         state,
         title: 'Платный период закончился',
         message: 'Платный период закончился. Администратор аккаунта может продлить доступ в разделе оплаты.',
+        expiresAt: null,
+        isExpired: true,
+        canCopy: false,
+        trialActivated: Boolean(account?.trialActivatedAt),
+        trialEndsAt: this.toIso(account?.trialEndsAt),
+        paidUntil: this.toIso(account?.paidUntil),
+        graceExtendedUntil: this.toIso(account?.graceExtendedUntil),
+        graceExtensionUsed: Boolean(account?.graceExtensionUsed),
+        isLegacy: Boolean(account?.isLegacy),
+        firstSeenSource: account?.firstSeenSource || null,
+        ...contact,
+      };
+    }
+
+    if (state === 'uninstalled') {
+      return {
+        state,
+        title: 'Виджет удалён',
+        message: 'Виджет удалён из аккаунта amoCRM. При повторной установке статус обновится автоматически.',
         expiresAt: null,
         isExpired: true,
         canCopy: false,
@@ -1057,6 +1092,12 @@ export class BillingService {
         firstSeenSource: 'settings',
       });
     }
+    if (updated.uninstalledAt) {
+      updated = await this.accountsService.update(updated.id, {
+        uninstalledAt: null,
+        installedAt: updated.installedAt || this.getNow(),
+      });
+    }
 
     if (!updated.installNotifiedAt) {
       const normalized = this.serializeProfile(payload.profile);
@@ -1083,6 +1124,72 @@ export class BillingService {
     }
 
     return this.toPublicLicenseView(updated);
+  }
+
+  async trackUninstall(payload: UninstallPayload) {
+    const accountId = Number(payload?.accountId);
+    const widgetCode = String(payload?.widgetCode || '').trim();
+    const domain = normalizeAmoDomain(payload?.domain || payload?.profile?.domain || '');
+
+    let account: Account | null = null;
+    if (Number.isFinite(accountId) && accountId > 0) {
+      account = await this.accountsService.findByAmoId(
+        accountId,
+        widgetCode || undefined,
+      );
+      if (!account && !widgetCode) {
+        account = await this.accountsService.findByAmoId(accountId);
+      }
+    }
+
+    if (!account && domain) {
+      const accounts = await this.accountsService.findAll();
+      account = accounts.find((item) => normalizeAmoDomain(item.domain) === domain) || null;
+      if (account && widgetCode && account.widgetCode !== widgetCode) {
+        account =
+          accounts.find(
+            (item) =>
+              normalizeAmoDomain(item.domain) === domain &&
+              item.widgetCode === widgetCode,
+          ) || account;
+      }
+    }
+
+    if (!account) {
+      if (Number.isFinite(accountId) && accountId > 0) {
+        await this.upsertPendingClient(accountId, payload.profile, {
+          firstSeenSource: 'uninstall_hook',
+        });
+      }
+      return {
+        ok: false,
+        message: 'Установка не найдена, но хук принят.',
+      };
+    }
+
+    const now = this.getNow();
+    const updated = await this.accountsService.update(account.id, {
+      uninstalledAt: now,
+      lastSeenAt: now,
+      firstSeenSource: account.firstSeenSource || 'uninstall_hook',
+    });
+
+    await this.sendTelegramMessage(
+      [
+        '🗑 Виджет Копирование сделок удалён из amoCRM',
+        '',
+        `🌐 Домен: ${this.getDomain(updated, payload.profile) || '-'}`,
+        `🏢 Account ID: ${updated.amoId}`,
+        `🧩 Widget code: ${updated.widgetCode || widgetCode || '-'}`,
+        '',
+        `⏰ ${this.getMskTimestamp(now)}`,
+      ].join('\n'),
+    );
+
+    return {
+      ok: true,
+      status: this.toPublicLicenseView(updated),
+    };
   }
 
   async trackCopyAttempt(payload: CopyAttemptPayload) {
@@ -1829,6 +1936,7 @@ export class BillingService {
       invoices: invoices.map((invoice) => this.toAdminInvoiceRow(invoice)),
       usersCount: account.usersCount || 0,
       installedAt: this.toIso(account.installedAt),
+      uninstalledAt: this.toIso(account.uninstalledAt),
       isLegacy: Boolean(account.isLegacy),
       firstSeenSource: account.firstSeenSource || null,
       status,
@@ -1885,6 +1993,7 @@ export class BillingService {
         new Date(now.getTime() + 30 * 24 * 60 * 60 * 1000);
 
       if (status === 'paid') {
+        updates.uninstalledAt = null;
         updates.paidUntil = manualDate
           ? manualDate
           : new Date(defaultPaidUntil).getTime() > now.getTime()
@@ -1893,32 +2002,39 @@ export class BillingService {
         updates.trialEndsAt = null;
         updates.graceExtendedUntil = null;
       } else if (status === 'paid_expired') {
+        updates.uninstalledAt = null;
         updates.paidUntil =
           rawPaidUntil && updates.paidUntil ? updates.paidUntil : yesterday;
         updates.trialEndsAt = null;
         updates.graceExtendedUntil = null;
       } else if (status === 'trial') {
+        updates.uninstalledAt = null;
         updates.paidUntil = null;
         updates.trialActivatedAt = account.trialActivatedAt || now;
         updates.trialEndsAt =
           manualDate || new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000);
         updates.graceExtendedUntil = null;
       } else if (status === 'expired') {
+        updates.uninstalledAt = null;
         updates.paidUntil = null;
         updates.trialActivatedAt = account.trialActivatedAt || yesterday;
         updates.trialEndsAt = yesterday;
         updates.graceExtendedUntil = null;
       } else if (status === 'grace') {
+        updates.uninstalledAt = null;
         updates.graceExtendedUntil =
           manualDate || new Date(now.getTime() + 24 * 60 * 60 * 1000);
         updates.paidUntil = null;
       } else if (status === 'not_activated' || status === 'legacy_not_activated') {
+        updates.uninstalledAt = null;
         updates.paidUntil = null;
         updates.trialActivatedAt = null;
         updates.trialEndsAt = null;
         updates.graceExtendedUntil = null;
         updates.graceExtensionUsed = false;
         updates.isLegacy = status === 'legacy_not_activated';
+      } else if (status === 'uninstalled') {
+        updates.uninstalledAt = now;
       } else {
         throw new BadRequestException('Некорректный статус');
       }
@@ -2361,11 +2477,13 @@ export class BillingService {
             expiresRaw: dateValue(status.expiresAt || status.paidUntil || status.trialEndsAt || status.graceExtendedUntil),
             installed: isoToText(widget.installedAt),
             installedRaw: dateValue(widget.installedAt),
+            uninstalled: isoToText(widget.uninstalledAt),
+            uninstalledRaw: dateValue(widget.uninstalledAt),
             legacy: legacy ? 'да' : 'нет',
             firstSeenSource: firstSeenSource,
             accountId: widget.id
           };
-          row.search = normalizeText([row.crm,row.domain,row.client,row.adminName,row.adminEmail,row.adminPhone,row.billingInn,row.billingLegalName,row.latestInvoiceNumber,row.latestInvoiceStatus,row.licenses,row.widget,row.widgetSlug,row.status,row.expires,row.installed,row.legacy,row.firstSeenSource].join(' '));
+          row.search = normalizeText([row.crm,row.domain,row.client,row.adminName,row.adminEmail,row.adminPhone,row.billingInn,row.billingLegalName,row.latestInvoiceNumber,row.latestInvoiceStatus,row.licenses,row.widget,row.widgetSlug,row.status,row.expires,row.installed,row.uninstalled,row.legacy,row.firstSeenSource].join(' '));
           rows.push(row);
         });
       });
@@ -2459,7 +2577,7 @@ export class BillingService {
           '<td><b>'+escapeHtml(row.widget)+'</b><div class="micro">'+escapeHtml(row.widgetSlug)+'</div></td>'+
           '<td>'+statusPill(row)+invoiceSummary(row)+'</td>'+
           '<td>'+escapeHtml(row.expires)+'</td>'+
-          '<td>'+escapeHtml(row.installed)+'</td>'+
+          '<td>'+escapeHtml(row.uninstalled ? 'Удалён: '+row.uninstalled : row.installed)+'</td>'+
           '<td>'+escapeHtml(row.legacy)+'<div class="micro">'+escapeHtml(row.firstSeenSource||'')+'</div></td>'+
           '<td>'+licenseControls(row)+'</td>';
         tbody.appendChild(tr);
@@ -2518,7 +2636,8 @@ export class BillingService {
         ['expired','Триал истёк'],
         ['grace','+1 день'],
         ['not_activated','Не активирован'],
-        ['legacy_not_activated','Legacy']
+        ['legacy_not_activated','Legacy'],
+        ['uninstalled','Удалён']
       ].map(function(item){
         return '<option value="'+item[0]+'" '+(row.statusState===item[0]?'selected':'')+'>'+item[1]+'</option>';
       }).join('');

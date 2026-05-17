@@ -68,6 +68,7 @@ export class AuthService {
         widgetCode: credentials.widgetCode,
         amoClientId: credentials.amoClientId,
         lastSeenAt: new Date(),
+        uninstalledAt: null,
         isLegacy: account.isLegacy || Boolean(client.isLegacy),
         firstSeenSource:
           account.firstSeenSource || client.firstSeenSource || 'oauth_callback',
