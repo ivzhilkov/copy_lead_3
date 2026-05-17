@@ -633,7 +633,9 @@ export class BillingService {
     );
 
     if (!account) {
-      const pendingClient = await this.upsertPendingClient(payload.accountId, payload.profile);
+      const pendingClient = await this.upsertPendingClient(payload.accountId, payload.profile, {
+        firstSeenSource: 'settings',
+      });
       const normalized = this.serializeProfile(payload.profile);
       if (pendingClient && !pendingClient.pendingInstallNotifiedAt) {
         await this.sendTelegramMessage(
@@ -1699,8 +1701,9 @@ export class BillingService {
         const widgets=client.widgets&&client.widgets.length?client.widgets:[{}];
         widgets.forEach(function(widget){
           const status=widget.status||{};
-          const legacy=Boolean(widget.isLegacy || client.isLegacy);
-          const firstSeenSource=widget.firstSeenSource || client.firstSeenSource || '';
+          const pendingWithoutSource=!widget.id && !widget.firstSeenSource && !client.firstSeenSource;
+          const legacy=Boolean(widget.isLegacy || client.isLegacy || pendingWithoutSource);
+          const firstSeenSource=widget.firstSeenSource || client.firstSeenSource || (pendingWithoutSource ? 'manual_copy' : '');
           const pendingStatusTitle=legacy && !widget.id ? 'Требуется авторизация' : '-';
           const pendingStatusState=legacy && !widget.id ? 'not_activated' : '';
           const row={

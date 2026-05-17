@@ -166,11 +166,18 @@ export class AccountsService {
     }
 
     const current = await this.clientsRepo.findOne({ amoId });
-    return this.clientsRepo.save({
+    const next = {
       ...(current || {}),
       ...data,
       amoId,
-    });
+    };
+    if (current?.firstSeenSource && data.firstSeenSource === 'settings') {
+      next.firstSeenSource = current.firstSeenSource;
+    }
+    if (current?.isLegacy && data.isLegacy === undefined) {
+      next.isLegacy = current.isLegacy;
+    }
+    return this.clientsRepo.save(next);
   }
 
   async upsertIntegration(data: Partial<WidgetIntegration>) {
