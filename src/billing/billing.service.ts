@@ -10,6 +10,8 @@ import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import axios from 'axios';
 import { createHash, randomBytes, scryptSync, timingSafeEqual } from 'crypto';
+import { existsSync, readFileSync } from 'fs';
+import { extname, join } from 'path';
 import { Account } from 'src/accounts/account.entity';
 import { AccountsService } from 'src/accounts/accounts.service';
 import { normalizeAmoDomain } from 'src/helpers/amo-domain';
@@ -821,12 +823,22 @@ export class BillingService {
     return pdfMake;
   }
 
+  private getInvoiceAssetDataUrl(fileName: string) {
+    const assetPath = join(__dirname, 'assets', fileName);
+    if (!existsSync(assetPath)) return null;
+    const ext = extname(fileName).toLowerCase();
+    const mime = ext === '.jpg' || ext === '.jpeg' ? 'image/jpeg' : 'image/png';
+    return `data:${mime};base64,${readFileSync(assetPath).toString('base64')}`;
+  }
+
   private async renderInvoicePdf(invoice: BillingInvoice) {
     const pdfMake = this.getPdfMake();
     const dateText = this.getInvoiceDate(invoice.createdAt);
     const amount = this.formatRubles(invoice.amountKopecks);
     const vat = this.formatRubles(invoice.vatKopecks);
     const purpose = `Оплата по Счет-оферта №${invoice.invoiceNumber} от ${dateText}, amoCRM Account ID ${invoice.amoId}. В том числе НДС 5%`;
+    const logoImage = this.getInvoiceAssetDataUrl('invoice-logo.png');
+    const signatureImage = this.getInvoiceAssetDataUrl('invoice-signature.png');
     const licensee = [
       invoice.legalName,
       `ИНН: ${invoice.inn}`,
@@ -865,6 +877,15 @@ export class BillingService {
         small: { fontSize: 7.5, color: '#333333' },
       },
       content: [
+        ...(logoImage
+          ? [
+              {
+                image: logoImage,
+                width: 132,
+                margin: [0, 0, 0, 8],
+              },
+            ]
+          : []),
         {
           columns: [
             {
@@ -949,6 +970,14 @@ export class BillingService {
         {
           columns: [
             { width: 120, text: 'Руководитель', bold: true },
+            signatureImage
+              ? {
+                  width: 118,
+                  image: signatureImage,
+                  fit: [112, 48],
+                  margin: [0, -16, 8, 0],
+                }
+              : { width: 118, text: '' },
             { width: '*', text: 'ИП Жилков И.В.', bold: true },
           ],
           margin: [0, 8, 0, 0],
