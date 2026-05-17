@@ -710,11 +710,15 @@ export class BillingService {
     }
 
     let updated = await this.upsertProfile(account, payload.profile);
+    const hasBillingHistory = Boolean(
+      updated.trialActivatedAt ||
+        updated.trialEndsAt ||
+        updated.paidUntil ||
+        updated.graceExtensionUsed,
+    );
     const shouldMarkLegacy =
-      !updated.firstSeenSource &&
-      !updated.trialActivatedAt &&
-      !updated.trialEndsAt &&
-      !updated.paidUntil;
+      !updated.isLegacy &&
+      !hasBillingHistory;
 
     if (shouldMarkLegacy) {
       updated = await this.accountsService.update(updated.id, {
@@ -1701,11 +1705,11 @@ export class BillingService {
         const widgets=client.widgets&&client.widgets.length?client.widgets:[{}];
         widgets.forEach(function(widget){
           const status=widget.status||{};
-          const pendingWithoutSource=!widget.id && !widget.firstSeenSource && !client.firstSeenSource;
-          const legacy=Boolean(widget.isLegacy || client.isLegacy || pendingWithoutSource);
-          const firstSeenSource=widget.firstSeenSource || client.firstSeenSource || (pendingWithoutSource ? 'manual_copy' : '');
-          const pendingStatusTitle=legacy && !widget.id ? 'Требуется авторизация' : '-';
-          const pendingStatusState=legacy && !widget.id ? 'not_activated' : '';
+          const pendingWithoutWidget=!widget.id;
+          const legacy=Boolean(widget.isLegacy || client.isLegacy || pendingWithoutWidget);
+          const firstSeenSource=widget.firstSeenSource || client.firstSeenSource || (pendingWithoutWidget ? 'manual_copy' : '');
+          const pendingStatusTitle=pendingWithoutWidget ? 'Не активирован' : '-';
+          const pendingStatusState=pendingWithoutWidget ? 'not_activated' : '';
           const row={
             id: widget.id || client.amoId,
             clientKey: String(client.amoId || client.domain || ''),
