@@ -15,6 +15,7 @@ import { AccountsService } from 'src/accounts/accounts.service';
 import { normalizeAmoDomain } from 'src/helpers/amo-domain';
 import { Repository } from 'typeorm';
 import { AdminCredential } from './admin-credential.entity';
+import { BillingInvoice } from './billing-invoice.entity';
 
 export type LicenseState =
   | 'not_activated'
@@ -63,6 +64,17 @@ type RequestPaymentPayload = {
   profile?: PublicProfilePayload;
 };
 
+type CreateInvoicePayload = {
+  accountId: number;
+  widgetCode: string;
+  inn?: string;
+  email?: string;
+  phone?: string;
+  legalName?: string;
+  source?: 'settings' | 'manual_copy' | 'unknown';
+  profile?: PublicProfilePayload;
+};
+
 type AdminLoginPayload = {
   login?: string;
   password?: string;
@@ -104,6 +116,8 @@ export class BillingService {
     private readonly configService: ConfigService,
     @InjectRepository(AdminCredential)
     private readonly adminCredentialRepo: Repository<AdminCredential>,
+    @InjectRepository(BillingInvoice)
+    private readonly invoiceRepo: Repository<BillingInvoice>,
   ) {}
 
   private getNow() {
@@ -626,6 +640,306 @@ export class BillingService {
     return normalizeAmoDomain(profile?.domain || account.domain);
   }
 
+  private normalizeInn(value?: string) {
+    return String(value || '').replace(/\D/g, '');
+  }
+
+  private normalizeContact(value?: string) {
+    const normalized = String(value || '').trim();
+    return normalized || null;
+  }
+
+  private formatRubles(kopecks: number) {
+    return (Number(kopecks || 0) / 100)
+      .toLocaleString('ru-RU', {
+        minimumFractionDigits: 2,
+        maximumFractionDigits: 2,
+      })
+      .replace(/\u00a0/g, ' ');
+  }
+
+  private getInvoiceDate(date = this.getNow()) {
+    return new Intl.DateTimeFormat('ru-RU', {
+      timeZone: 'Europe/Moscow',
+      day: '2-digit',
+      month: '2-digit',
+      year: 'numeric',
+    }).format(date);
+  }
+
+  private getDadataApiKey() {
+    return String(
+      this.configService.get<string>('dadataApiKey') ||
+        process.env.DADATA_API_KEY ||
+        '',
+    ).trim();
+  }
+
+  private getDadataSecretKey() {
+    return String(
+      this.configService.get<string>('dadataSecretKey') ||
+        process.env.DADATA_SECRET_KEY ||
+        '',
+    ).trim();
+  }
+
+  private async resolveCompanyByInn(
+    inn: string,
+    manualLegalName?: string,
+  ): Promise<{ legalName: string; ogrn: string | null; status: string }> {
+    const apiKey = this.getDadataApiKey();
+    const secretKey = this.getDadataSecretKey();
+    const manualName = String(manualLegalName || '').trim();
+
+    if (!apiKey) {
+      if (manualName) {
+        return { legalName: manualName, ogrn: null, status: 'manual_no_dadata_key' };
+      }
+      throw new BadRequestException({
+        code: 'dadata_unavailable',
+        message:
+          'DaData не настроена. Введите название организации вручную или напишите менеджеру.',
+      });
+    }
+
+    try {
+      const { data } = await axios.post(
+        'https://suggestions.dadata.ru/suggestions/api/4_1/rs/findById/party',
+        { query: inn },
+        {
+          timeout: 8000,
+          headers: {
+            Authorization: `Token ${apiKey}`,
+            ...(secretKey ? { 'X-Secret': secretKey } : {}),
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+        },
+      );
+      const suggestion = Array.isArray(data?.suggestions)
+        ? data.suggestions[0]
+        : null;
+      const legalName =
+        suggestion?.data?.name?.short_with_opf ||
+        suggestion?.data?.name?.full_with_opf ||
+        suggestion?.value ||
+        '';
+
+      if (!legalName) {
+        throw new BadRequestException({
+          code: 'dadata_not_found',
+          message:
+            'Компания по этому ИНН не найдена. Проверьте ИНН или напишите менеджеру.',
+        });
+      }
+
+      return {
+        legalName,
+        ogrn: suggestion?.data?.ogrn || null,
+        status: 'found',
+      };
+    } catch (e) {
+      if (e instanceof BadRequestException) throw e;
+      this.logger.warn(`DaData не ответила по ИНН ${inn}: ${e?.message || e}`);
+      if (manualName) {
+        return { legalName: manualName, ogrn: null, status: 'manual_dadata_error' };
+      }
+      throw new BadRequestException({
+        code: 'dadata_unavailable',
+        message:
+          'DaData временно не отвечает. Введите название организации вручную или напишите менеджеру.',
+      });
+    }
+  }
+
+  private buildPaymentQr(invoice: BillingInvoice, dateText: string) {
+    const purpose = `Оплата по Счет-оферта №${invoice.invoiceNumber} от ${dateText}. В том числе НДС 5%`;
+    return [
+      'ST00012',
+      'Name=ИП Жилков Иван Вячеславович',
+      'PersonalAcc=40802810203500039167',
+      'BankName=ООО "Банк Точка"',
+      'BIC=044525104',
+      'CorrespAcc=30101810745374525104',
+      'PayeeINN=667116903111',
+      `PayerINN=${invoice.inn}`,
+      `Sum=${invoice.amountKopecks}`,
+      `Purpose=${purpose}`,
+    ].join('|');
+  }
+
+  private getPdfMake() {
+    const pdfMake = require('pdfmake/build/pdfmake');
+    const pdfFonts = require('pdfmake/build/vfs_fonts');
+    pdfMake.vfs = pdfFonts.pdfMake?.vfs || pdfFonts;
+    return pdfMake;
+  }
+
+  private async renderInvoicePdf(invoice: BillingInvoice) {
+    const pdfMake = this.getPdfMake();
+    const dateText = this.getInvoiceDate(invoice.createdAt);
+    const amount = this.formatRubles(invoice.amountKopecks);
+    const vat = this.formatRubles(invoice.vatKopecks);
+    const purpose = `Оплата по Счет-оферта №${invoice.invoiceNumber} от ${dateText}. В том числе НДС 5%`;
+    const licensee = [
+      invoice.legalName,
+      `ИНН: ${invoice.inn}`,
+      invoice.ogrn ? `ОГРН: ${invoice.ogrn}` : '',
+      invoice.email ? `email: ${invoice.email}` : '',
+      invoice.phone ? `тел.: ${invoice.phone}` : '',
+    ].filter(Boolean).join(', ');
+
+    const offerText =
+      'Настоящий Счет-оферта (далее - "Счет") направляется Лицензиату в соответствии со ст.435 Гражданского Кодекса РФ (далее "ГК РФ"), является письменным предложением Лицензиара заключить настоящий Лицензионный договор (неисключительная лицензия) путем принятия (акцепта) оферты Лицензиатом в установленном порядке (п.3 ст.438 ГК РФ) и считается соблюдением письменной формы договора (п.3 ст.434 ГК РФ). Под указанными в оферте следующими терминами понимаются их нижеуказанные значения: Лицензиар - лицо, обладающее исключительным правом на ПО. Лицензионное соглашение - соглашение между Лицензиаром и Лицензиатом, которое предусматривает полномочия и ограничения использования Лицензиатом ПО, и условия которого безоговорочно принимаются Лицензиатом с момента начала использования ПО.';
+
+    const conditions = [
+      'Предметом Лицензионного договора является предоставление Лицензиаром неисключительного права на использование указанного в Счете программного обеспечения для ЭВМ (ПО) и/или расширение прав на использование соответствующего ПО.',
+      'Вознаграждением Лицензиара по Лицензионному договору является сумма, указанная в Счете-оферте.',
+      'Существенным условием заключения Лицензионного договора является полная единовременная оплата Лицензиатом настоящего Счета, которая будет считаться единственно возможным надлежащим акцептом данной оферты (п.3 ст.438 ГК РФ).',
+      'Лицензиар гарантирует, что правомерно обладает всем необходимым объемом прав, которые предоставляются Лицензиату по Лицензионному договору.',
+      'Лицензиат имеет право в рамках каждой лицензии использовать только один Аккаунт в порядке, предусмотренном Лицензионным соглашением на соответствующее ПО и исключительно для самостоятельного использования Лицензиатом, без права сублицензирования третьих лиц.',
+      'Принимая настоящую оферту, Лицензиат подтверждает, что ознакомлен и согласен с положениями Лицензионного соглашения по соответствующему ПО, расположенному в свободном доступе по адресу: https://clients.simsales.ru/offerta',
+      'Оплата по настоящему Счету должна поступить на расчетный счет Лицензиара в течение 3 (трех) календарных дней со дня выставления Счета.',
+      'В день поступления оплаты на расчетный счет Лицензиара осуществляется Прием-передача неисключительного права на использование ПО для ЭВМ.',
+      'В течение 5-ти рабочих дней со дня Приема-передачи Лицензиар отправляет на электронный адрес Лицензиата копию УПД, подписанную со своей стороны.',
+      'Лицензиат обязуется не нарушать авторские права Лицензиара. Любые споры подлежат рассмотрению по месту нахождения Лицензиара.',
+    ];
+
+    const docDefinition = {
+      pageSize: 'A4',
+      pageMargins: [28, 26, 28, 26],
+      defaultStyle: {
+        font: 'Roboto',
+        fontSize: 8.5,
+        lineHeight: 1.15,
+      },
+      styles: {
+        title: { fontSize: 14, bold: true, margin: [0, 0, 0, 8] },
+        label: { bold: true },
+        small: { fontSize: 7.5, color: '#333333' },
+      },
+      content: [
+        {
+          columns: [
+            {
+              width: '*',
+              stack: [
+                { text: `Счет-оферта №${invoice.invoiceNumber} от ${dateText}`, style: 'title' },
+                {
+                  table: {
+                    widths: [95, '*'],
+                    body: [
+                      [{ text: 'Получатель', style: 'label' }, 'ИП Жилков Иван Вячеславович'],
+                      [{ text: 'Банк получателя', style: 'label' }, 'ООО "Банк Точка"'],
+                      [{ text: 'ИНН', style: 'label' }, '667116903111'],
+                      [{ text: 'БИК', style: 'label' }, '044525104'],
+                      [{ text: 'Расчетный счет', style: 'label' }, '40802810203500039167'],
+                      [{ text: 'Кор. счет', style: 'label' }, '30101810745374525104'],
+                    ],
+                  },
+                  layout: 'lightHorizontalLines',
+                },
+              ],
+            },
+            {
+              width: 116,
+              stack: [
+                { qr: this.buildPaymentQr(invoice, dateText), fit: 106, alignment: 'right', margin: [0, 0, 0, 4] },
+                { text: 'QR для оплаты в банке', alignment: 'right', style: 'small' },
+              ],
+            },
+          ],
+          columnGap: 12,
+        },
+        { text: `Назначение платежа: ${purpose}`, margin: [0, 8, 0, 8] },
+        {
+          table: {
+            widths: [72, '*'],
+            body: [
+              [{ text: 'Лицензиар:', style: 'label' }, 'ИП Жилков Иван Вячеславович, ИНН 667116903111, г. Курган'],
+              [{ text: 'Лицензиат:', style: 'label' }, licensee],
+              [{ text: 'Основание:', style: 'label' }, 'Основной'],
+            ],
+          },
+          layout: 'noBorders',
+          margin: [0, 0, 0, 8],
+        },
+        {
+          table: {
+            headerRows: 1,
+            widths: [18, '*', 38, 30, 58, 58],
+            body: [
+              [
+                { text: '№', bold: true, alignment: 'center' },
+                { text: 'Товары (работы, услуги)', bold: true },
+                { text: 'Кол-во', bold: true, alignment: 'center' },
+                { text: 'Ед.', bold: true, alignment: 'center' },
+                { text: 'Цена', bold: true, alignment: 'right' },
+                { text: 'Сумма', bold: true, alignment: 'right' },
+              ],
+              [
+                { text: '1', alignment: 'center' },
+                'Виджет “Копирование сделок” на 12 месяцев',
+                { text: '1', alignment: 'center' },
+                { text: 'шт', alignment: 'center' },
+                { text: amount, alignment: 'right' },
+                { text: amount, alignment: 'right' },
+              ],
+            ],
+          },
+          margin: [0, 0, 0, 8],
+        },
+        { text: `Итого: ${amount}`, alignment: 'right', bold: true },
+        { text: `В том числе НДС 5%: ${vat}`, alignment: 'right' },
+        { text: `Всего одно наименование на сумму ${amount} руб.`, margin: [0, 6, 0, 0] },
+        { text: 'десять тысяч рублей 00 копеек', bold: true, margin: [0, 0, 0, 8] },
+        { text: offerText, margin: [0, 0, 0, 6] },
+        { text: 'Условия оферты:', bold: true, margin: [0, 0, 0, 4] },
+        {
+          ol: conditions.map((text) => ({ text, margin: [0, 0, 0, 2] })),
+          margin: [10, 0, 0, 8],
+        },
+        {
+          columns: [
+            { width: 120, text: 'Руководитель', bold: true },
+            { width: '*', text: 'ИП Жилков И.В.', bold: true },
+          ],
+          margin: [0, 8, 0, 0],
+        },
+      ],
+    };
+
+    return new Promise<Buffer>((resolve, reject) => {
+      try {
+        pdfMake.createPdf(docDefinition).getBuffer((raw: Uint8Array) => {
+          resolve(Buffer.from(raw));
+        });
+      } catch (e) {
+        reject(e);
+      }
+    });
+  }
+
+  private async createInvoiceNumber() {
+    const today = new Intl.DateTimeFormat('ru-RU', {
+      timeZone: 'Europe/Moscow',
+      year: '2-digit',
+      month: '2-digit',
+      day: '2-digit',
+    })
+      .format(this.getNow())
+      .replace(/\D/g, '');
+
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const suffix = randomBytes(2).toString('hex').toUpperCase();
+      const number = `CL-${today}-${suffix}`;
+      const exists = await this.invoiceRepo.findOne({ invoiceNumber: number });
+      if (!exists) return number;
+    }
+
+    return `CL-${today}-${Date.now().toString(36).toUpperCase()}`;
+  }
+
   async trackInstall(payload: InstallPayload) {
     const account = await this.getAccountOrNull(
       payload.accountId,
@@ -865,6 +1179,93 @@ export class BillingService {
       message: extended
         ? 'Мы продлили виджет на 1 день и скоро с вами свяжемся для оплаты.'
         : 'Запрос на оплату отправлен, скоро с вами свяжемся.',
+    };
+  }
+
+  async createInvoicePdf(payload: CreateInvoicePayload) {
+    const inn = this.normalizeInn(payload.inn);
+    if (!/^\d{10}$|^\d{12}$/.test(inn)) {
+      throw new BadRequestException({
+        code: 'invalid_inn',
+        message: 'Введите корректный ИНН: 10 или 12 цифр.',
+      });
+    }
+
+    const email = this.normalizeContact(payload.email);
+    const phone = this.normalizeContact(payload.phone);
+    if (!email) {
+      throw new BadRequestException({
+        code: 'email_required',
+        message: 'Введите email для счёта.',
+      });
+    }
+    if (!phone) {
+      throw new BadRequestException({
+        code: 'phone_required',
+        message: 'Введите телефон для счёта.',
+      });
+    }
+
+    const account = await this.getAccountOrNull(
+      payload.accountId,
+      payload.widgetCode,
+    );
+    if (!account) {
+      await this.upsertPendingClient(payload.accountId, payload.profile, {
+        firstSeenSource: payload.source || 'settings',
+      });
+      throw new BadRequestException({
+        code: 'not_authorized',
+        message:
+          'Сначала нужно завершить авторизацию виджета в amoCRM, затем можно скачать счёт.',
+      });
+    }
+
+    const profileUpdated = await this.upsertProfile(account, payload.profile);
+    await this.ensureAmoAdminOrThrow(profileUpdated, payload.profile);
+
+    const company = await this.resolveCompanyByInn(inn, payload.legalName);
+    const invoice = await this.invoiceRepo.save({
+      invoiceNumber: await this.createInvoiceNumber(),
+      amoId: profileUpdated.amoId,
+      accountId: profileUpdated.id,
+      widgetCode: profileUpdated.widgetCode || payload.widgetCode,
+      inn,
+      legalName: company.legalName,
+      ogrn: company.ogrn,
+      phone,
+      email,
+      amountKopecks: 1000000,
+      vatRate: 5,
+      vatKopecks: 47619,
+      source: payload.source || 'settings',
+      dadataStatus: company.status,
+    });
+
+    const buffer = await this.renderInvoicePdf(invoice);
+    return {
+      invoice,
+      buffer,
+      filename: `schet-${invoice.invoiceNumber}.pdf`,
+    };
+  }
+
+  async getAdminInvoicePdf(invoiceNumber: string) {
+    const normalized = String(invoiceNumber || '').trim();
+    if (!normalized) {
+      throw new BadRequestException('Нужно передать номер счёта');
+    }
+    const invoice = await this.invoiceRepo.findOne({
+      where: { invoiceNumber: normalized },
+    } as any);
+    if (!invoice) {
+      throw new NotFoundException('Счёт не найден');
+    }
+    const buffer = await this.renderInvoicePdf(invoice);
+    return {
+      invoice,
+      buffer,
+      filename: `schet-${invoice.invoiceNumber}.pdf`,
     };
   }
 

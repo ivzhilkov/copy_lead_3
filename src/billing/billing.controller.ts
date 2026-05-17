@@ -9,8 +9,9 @@ import {
   Post,
   Query,
   Req,
+  Res,
 } from '@nestjs/common';
-import { Request } from 'express';
+import { Request, Response } from 'express';
 import { BillingService } from './billing.service';
 
 @Controller('billing')
@@ -88,6 +89,36 @@ export class BillingController {
       source,
       profile,
     });
+  }
+
+  @Post('/public/invoice')
+  async createInvoice(
+    @Body('account_id') accountIdRaw: string | number,
+    @Body('widget_code') widgetCode: string,
+    @Body('inn') inn: string,
+    @Body('email') email: string,
+    @Body('phone') phone: string,
+    @Body('legal_name') legalName: string,
+    @Body('source') source: 'settings' | 'manual_copy' | 'unknown',
+    @Body('profile') profile: any,
+    @Res() res: Response,
+  ) {
+    const result = await this.billingService.createInvoicePdf({
+      accountId: Number(accountIdRaw),
+      widgetCode,
+      inn,
+      email,
+      phone,
+      legalName,
+      source,
+      profile,
+    });
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${result.filename}"`,
+    );
+    res.send(result.buffer);
   }
 
   @Get('/admin/panel')
@@ -181,6 +212,22 @@ export class BillingController {
   async testTelegram(@Req() req: Request) {
     await this.ensureAdmin(req);
     return this.billingService.sendTestTelegramMessage();
+  }
+
+  @Get('/admin/invoice/:invoiceNumber/pdf')
+  async getAdminInvoicePdf(
+    @Req() req: Request,
+    @Param('invoiceNumber') invoiceNumber: string,
+    @Res() res: Response,
+  ) {
+    await this.ensureAdmin(req);
+    const result = await this.billingService.getAdminInvoicePdf(invoiceNumber);
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader(
+      'Content-Disposition',
+      `attachment; filename="${result.filename}"`,
+    );
+    res.send(result.buffer);
   }
 
   @Post('/admin/account/:amoId/extend')

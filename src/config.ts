@@ -8,4 +8,6 @@ export const config = () => ({
   adminToken: process.env.ADMIN_TOKEN,
   adminLogin: process.env.ADMIN_LOGIN,
   adminPassword: process.env.ADMIN_PASSWORD,
+  dadataApiKey: process.env.DADATA_API_KEY,
+  dadataSecretKey: process.env.DADATA_SECRET_KEY,
 });

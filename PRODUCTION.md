@@ -16,9 +16,12 @@ Recommended for production:
 
 ```env
 TOKEN_ENCRYPTION_KEY=<stable-random-secret>
+DADATA_API_KEY=<dadata-api-key>
+DADATA_SECRET_KEY=<dadata-secret-key>
 ```
 
 If `TOKEN_ENCRYPTION_KEY` is not set, OAuth data encryption falls back to `CLIENT_SECRET`. Do not rotate the encryption key without a planned migration for existing OAuth rows.
+`DADATA_API_KEY` and `DADATA_SECRET_KEY` are used to find a legal entity by INN before generating invoice PDFs.
 
 ## Database
 
