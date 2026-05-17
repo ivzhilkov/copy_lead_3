@@ -113,6 +113,8 @@ type LicenseView = {
   billingOgrn: string | null;
   latestInvoiceNumber: string | null;
   latestInvoiceStatus: string | null;
+  latestInvoiceCreatedAt: string | null;
+  latestInvoicePaidAt: string | null;
 };
 
 type PaidLicensesCacheEntry = {
@@ -486,6 +488,8 @@ export class BillingService {
       billingOgrn: account?.billingOgrn || null,
       latestInvoiceNumber: account?.latestInvoiceNumber || null,
       latestInvoiceStatus: account?.latestInvoiceStatus || null,
+      latestInvoiceCreatedAt: this.toIso(account?.latestInvoiceCreatedAt),
+      latestInvoicePaidAt: this.toIso(account?.latestInvoicePaidAt),
     };
   }
 
@@ -514,6 +518,8 @@ export class BillingService {
       billingOgrn: null,
       latestInvoiceNumber: null,
       latestInvoiceStatus: null,
+      latestInvoiceCreatedAt: null,
+      latestInvoicePaidAt: null,
     };
   }
 
@@ -839,7 +845,7 @@ export class BillingService {
       'Лицензиар гарантирует, что правомерно обладает всем необходимым объемом прав, которые предоставляются Лицензиату по Лицензионному договору.',
       'Лицензиат имеет право в рамках каждой лицензии использовать только один Аккаунт в порядке, предусмотренном Лицензионным соглашением на соответствующее ПО и исключительно для самостоятельного использования Лицензиатом, без права сублицензирования третьих лиц.',
       'Принимая настоящую оферту, Лицензиат подтверждает, что ознакомлен и согласен с положениями Лицензионного соглашения по соответствующему ПО, расположенному в свободном доступе по адресу: https://clients.simsales.ru/offerta',
-      'Оплата по настоящему Счету должна поступить на расчетный счет Лицензиара в течение 3 (трех) календарных дней со дня выставления Счета.',
+      'Оплата по настоящему Счету должна поступить на расчетный счет Лицензиара в течение 30 (тридцати) календарных дней со дня выставления Счета.',
       'В день поступления оплаты на расчетный счет Лицензиара осуществляется Прием-передача неисключительного права на использование ПО для ЭВМ.',
       'В течение 5-ти рабочих дней со дня Приема-передачи Лицензиар отправляет на электронный адрес Лицензиата копию УПД, подписанную со своей стороны.',
       'Лицензиат обязуется не нарушать авторские права Лицензиара. Любые споры подлежат рассмотрению по месту нахождения Лицензиара.',
@@ -1595,6 +1601,16 @@ export class BillingService {
   async getAdminAccounts() {
     const clients = await this.accountsService.findAllClients();
     const accounts = await this.accountsService.findAll();
+    const invoices = await this.invoiceRepo.find({
+      order: { createdAt: 'DESC' },
+    } as any);
+    const invoicesByAccount = new Map<number, BillingInvoice[]>();
+    invoices.forEach((invoice) => {
+      if (!invoice.accountId) return;
+      const list = invoicesByAccount.get(invoice.accountId) || [];
+      list.push(invoice);
+      invoicesByAccount.set(invoice.accountId, list);
+    });
     const clientRows = await this.mapWithConcurrency(clients, 5, async (client) => {
       const widgets = client.widgets || [];
       const liveUsersCount = await this.getCurrentAmoPaidLicensesCount(widgets[0]);
@@ -1616,7 +1632,9 @@ export class BillingService {
         paidLicensesCount,
         usersCount: paidLicensesCount,
         usersCountSource: liveUsersCount === null ? 'stored' : 'amo_paid_active',
-        widgets: widgets.map((account) => this.toAdminAccountRow(account)),
+        widgets: widgets.map((account) =>
+          this.toAdminAccountRow(account, invoicesByAccount.get(account.id) || []),
+        ),
       };
     });
 
@@ -1640,7 +1658,7 @@ export class BillingService {
         paidLicensesCount,
         usersCount: paidLicensesCount,
         usersCountSource: liveUsersCount === null ? 'stored' : 'amo_paid_active',
-        widgets: [this.toAdminAccountRow(account)],
+        widgets: [this.toAdminAccountRow(account, invoicesByAccount.get(account.id) || [])],
       };
     });
 
@@ -1741,7 +1759,22 @@ export class BillingService {
     };
   }
 
-  private toAdminAccountRow(account: Account) {
+  private toAdminInvoiceRow(invoice: BillingInvoice) {
+    return {
+      invoiceNumber: invoice.invoiceNumber,
+      status: invoice.status || 'issued',
+      inn: invoice.inn,
+      legalName: invoice.legalName,
+      ogrn: invoice.ogrn,
+      email: invoice.email,
+      phone: invoice.phone,
+      amountKopecks: invoice.amountKopecks,
+      createdAt: this.toIso(invoice.createdAt),
+      paidAt: this.toIso(invoice.paidAt),
+    };
+  }
+
+  private toAdminAccountRow(account: Account, invoices: BillingInvoice[] = []) {
     const status = this.toPublicLicenseView(account);
     return {
       id: account.id,
@@ -1764,6 +1797,7 @@ export class BillingService {
       latestInvoiceStatus: account.latestInvoiceStatus,
       latestInvoiceCreatedAt: this.toIso(account.latestInvoiceCreatedAt),
       latestInvoicePaidAt: this.toIso(account.latestInvoicePaidAt),
+      invoices: invoices.map((invoice) => this.toAdminInvoiceRow(invoice)),
       usersCount: account.usersCount || 0,
       installedAt: this.toIso(account.installedAt),
       isLegacy: Boolean(account.isLegacy),
@@ -1968,6 +2002,9 @@ export class BillingService {
     .license-actions{display:grid;grid-template-columns:128px 132px auto auto auto;gap:7px;align-items:center;min-width:520px}
     .license-actions select,.license-actions input{min-height:34px;border-radius:9px;font-size:12px}
     .license-actions button{min-height:34px;padding:7px 10px;white-space:nowrap}
+    .invoice-history{display:flex;flex-direction:column;gap:10px}
+    .invoice-history__item{display:flex;flex-direction:column;gap:8px;padding:10px;border:1px solid var(--line);border-radius:12px;background:#fff}
+    .invoice-history__item .license-actions{grid-template-columns:128px auto auto;min-width:0}
     .client-toggle{width:30px;height:30px;min-height:30px;padding:0;border-radius:9px;margin-right:8px}
     .details-row td{background:var(--surface-soft)!important;color:var(--muted);font-size:13px}
     .details-grid{display:grid;grid-template-columns:repeat(4,minmax(180px,1fr));gap:10px}
@@ -2283,6 +2320,7 @@ export class BillingService {
             latestInvoiceStatus: widget.latestInvoiceStatus || '',
             latestInvoiceCreatedAt: widget.latestInvoiceCreatedAt || '',
             latestInvoicePaidAt: widget.latestInvoicePaidAt || '',
+            invoices: widget.invoices || [],
             licenses: Number(client.paidLicensesCount != null ? client.paidLicensesCount : client.usersCount || 0),
             licenseSource: client.usersCountSource || 'stored',
             widget: widget.widgetName || 'Копирование сделок',
@@ -2405,7 +2443,7 @@ export class BillingService {
             '<div><div class="detail-label">Телефон</div><div>'+escapeHtml(row.adminPhone||'-')+'</div></div>'+
             '<div><div class="detail-label">Домен</div><div>'+escapeHtml(row.domain||'-')+'</div></div>'+
             '<div><div class="detail-label">Юрлицо</div><div>'+escapeHtml(row.billingLegalName||'-')+'</div><div class="micro">ИНН '+escapeHtml(row.billingInn||'-')+(row.billingOgrn ? ', ОГРН '+escapeHtml(row.billingOgrn) : '')+'</div></div>'+
-            '<div><div class="detail-label">Счёт</div>'+invoiceControls(row)+'</div>'+
+            '<div><div class="detail-label">Счета</div>'+invoiceControls(row)+'</div>'+
             '</div></td>';
           tbody.appendChild(details);
         }
@@ -2421,19 +2459,26 @@ export class BillingService {
       return '<div class="micro">Счёт: '+escapeHtml(invoiceStatusText(row.latestInvoiceStatus))+' · '+escapeHtml(row.latestInvoiceNumber)+'</div>';
     }
     function invoiceControls(row){
-      if(!row.latestInvoiceNumber) return '<div>-</div>';
-      const options=[
-        ['issued','Выставлен'],
-        ['paid','Оплачен']
-      ].map(function(item){
-        return '<option value="'+item[0]+'" '+(row.latestInvoiceStatus===item[0]?'selected':'')+'>'+item[1]+'</option>';
-      }).join('');
-      return '<div><div>'+escapeHtml(row.latestInvoiceNumber)+'<div class="micro">Создан: '+escapeHtml(isoToText(row.latestInvoiceCreatedAt))+(row.latestInvoicePaidAt ? ' · оплачен: '+escapeHtml(isoToText(row.latestInvoicePaidAt)) : '')+'</div></div>'+
-        '<div class="license-actions">'+
-        '<select id="invoice-status-'+escapeHtml(row.latestInvoiceNumber)+'">'+options+'</select>'+
-        '<button onclick="saveInvoiceStatus(\\''+escapeHtml(row.latestInvoiceNumber)+'\\')">Сохранить</button>'+
-        '<button class="secondary" onclick="downloadInvoice(\\''+escapeHtml(row.latestInvoiceNumber)+'\\')">PDF</button>'+
-        '</div></div>';
+      const invoices=row.invoices||[];
+      if(!invoices.length) return '<div>-</div>';
+      return '<div class="invoice-history">'+invoices.map(function(invoice){
+        const number=invoice.invoiceNumber||'';
+        const options=[
+          ['issued','Выставлен'],
+          ['paid','Оплачен']
+        ].map(function(item){
+          return '<option value="'+item[0]+'" '+(invoice.status===item[0]?'selected':'')+'>'+item[1]+'</option>';
+        }).join('');
+        return '<div class="invoice-history__item">'+
+          '<div><b>'+escapeHtml(number)+'</b> <span class="pill '+(invoice.status==='paid'?'ok':'warn')+'">'+escapeHtml(invoiceStatusText(invoice.status))+'</span>'+
+          '<div class="micro">'+escapeHtml(invoice.legalName||'-')+' · ИНН '+escapeHtml(invoice.inn||'-')+'</div>'+
+          '<div class="micro">Создан: '+escapeHtml(isoToText(invoice.createdAt))+(invoice.paidAt ? ' · оплачен: '+escapeHtml(isoToText(invoice.paidAt)) : '')+'</div></div>'+
+          '<div class="license-actions">'+
+          '<select id="invoice-status-'+escapeHtml(number)+'">'+options+'</select>'+
+          '<button onclick="saveInvoiceStatus(\\''+escapeHtml(number)+'\\')">Сохранить</button>'+
+          '<button class="secondary" onclick="downloadInvoice(\\''+escapeHtml(number)+'\\')">PDF</button>'+
+          '</div></div>';
+      }).join('')+'</div>';
     }
     function licenseControls(row){
       if(!row.accountId) return '<span class="muted">Нет установки</span>';
