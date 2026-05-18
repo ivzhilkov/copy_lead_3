@@ -1803,7 +1803,7 @@ export class BillingService {
 
   async getAdminIntegrations() {
     const integrations = await this.accountsService.findIntegrations();
-    return integrations.map((integration) => ({
+    const rows: any[] = integrations.map((integration) => ({
       id: integration.id,
       widgetName: integration.widgetName,
       widgetSlug: integration.widgetSlug,
@@ -1812,9 +1812,31 @@ export class BillingService {
       amoDomain: integration.amoDomain,
       redirectUri: integration.redirectUri,
       isDefault: integration.isDefault,
+      source: 'database',
       createdAt: this.toIso(integration.createdAt),
       updatedAt: this.toIso(integration.updatedAt),
     }));
+    if (!rows.some((integration) => integration.isDefault)) {
+      const widgetCode = this.configService.get<string>('widgetCode');
+      const amoClientId = this.configService.get<string>('clientId');
+      const redirectUri = this.configService.get<string>('redirectUri');
+      if (widgetCode && amoClientId) {
+        rows.unshift({
+          id: null,
+          widgetName: 'Копирование сделок',
+          widgetSlug: 'copy_leads',
+          widgetCode,
+          amoClientId,
+          amoDomain: null,
+          redirectUri,
+          isDefault: true,
+          source: 'env',
+          createdAt: null,
+          updatedAt: null,
+        });
+      }
+    }
+    return rows;
   }
 
   async saveAdminIntegration(payload: {
@@ -1825,6 +1847,7 @@ export class BillingService {
     clientSecret?: string;
     redirectUri?: string;
     amoDomain?: string;
+    isDefault?: boolean;
   }) {
     const saved = await this.accountsService.upsertIntegration({
       widgetName: String(payload.widgetName || 'Копирование сделок').trim(),
@@ -1836,6 +1859,7 @@ export class BillingService {
       redirectUri: String(
         payload.redirectUri || this.configService.get<string>('redirectUri') || '',
       ).trim(),
+      isDefault: payload.isDefault === true,
     });
 
     return {
@@ -1846,6 +1870,7 @@ export class BillingService {
       amoClientId: saved.amoClientId,
       amoDomain: saved.amoDomain,
       redirectUri: saved.redirectUri,
+      isDefault: saved.isDefault,
     };
   }
 
@@ -2121,6 +2146,8 @@ export class BillingService {
     .kpi small{display:block;margin-top:6px;color:var(--muted-2);font-size:11px;font-weight:650}
     .searchbar{display:flex;gap:10px;align-items:center;min-width:min(520px,100%)}
     .searchbar input{min-width:320px}
+    .settings-grid{display:grid;grid-template-columns:1.1fr 1.1fr 1.1fr 1.1fr auto;gap:10px;align-items:end;padding:16px}
+    .settings-note{padding:0 16px 16px;color:var(--muted);font-size:12px}
     .table-wrap{overflow:auto}
     table{width:100%;border-collapse:separate;border-spacing:0;min-width:1220px}
     th,td{border-bottom:1px solid var(--line);padding:10px 12px;text-align:left;vertical-align:middle}
@@ -2173,7 +2200,7 @@ export class BillingService {
     .modal-close:hover{background:#eef0f3;color:var(--text);box-shadow:none}
     .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
     .modal-actions{display:flex;justify-content:flex-end;gap:9px;margin-top:14px}
-    @media(max-width:860px){.page{width:calc(100% - 20px);padding-top:14px}.topbar,.panel-head{flex-direction:column}.toolbar,.searchbar{width:100%;justify-content:flex-start}.searchbar input{min-width:0}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.grid,.details-grid{grid-template-columns:1fr}h1{font-size:23px}}
+    @media(max-width:860px){.page{width:calc(100% - 20px);padding-top:14px}.topbar,.panel-head{flex-direction:column}.toolbar,.searchbar{width:100%;justify-content:flex-start}.searchbar input{min-width:0}.kpis{grid-template-columns:repeat(2,minmax(0,1fr))}.grid,.details-grid,.settings-grid{grid-template-columns:1fr}h1{font-size:23px}}
   </style>
 </head>
 <body>
@@ -2222,8 +2249,38 @@ export class BillingService {
     <section class="panel">
       <div class="panel-head">
         <div>
-          <h2>Установленные виджеты</h2>
-          <div id="clientsMeta" class="subtitle">Загрузка...</div>
+          <h2>Публичный виджет</h2>
+          <div id="publicWidgetMeta" class="subtitle">Ключи для виджета, который клиенты ставят сами из amoCRM.</div>
+        </div>
+        <button class="secondary" onclick="loadIntegrations()">Обновить ключи</button>
+      </div>
+      <form class="settings-grid" onsubmit="savePublicWidget(event)">
+        <div>
+          <label for="publicWidgetCode">Widget code</label>
+          <input id="publicWidgetCode" placeholder="Widget code публичного виджета" required />
+        </div>
+        <div>
+          <label for="publicClientId">Client ID</label>
+          <input id="publicClientId" placeholder="Client ID" required />
+        </div>
+        <div>
+          <label for="publicClientSecret">Секрет</label>
+          <input id="publicClientSecret" type="password" placeholder="Новый секрет" required />
+        </div>
+        <div>
+          <label for="publicDomain">Домен</label>
+          <input id="publicDomain" placeholder="Опционально" />
+        </div>
+        <button id="publicSaveButton" type="submit">Сохранить</button>
+      </form>
+      <div id="publicWidgetStatus" class="settings-note">Секрет не показывается после сохранения. Адрес возврата берётся из настроек сервера.</div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Клиенты</h2>
+          <div id="clientsMeta" class="subtitle">Публичные установки клиентов и приватные подключения, которые добавлены вручную.</div>
         </div>
         <div class="searchbar">
           <input id="globalSearch" placeholder="Поиск по любому столбцу" oninput="applyTable()" />
@@ -2268,7 +2325,7 @@ export class BillingService {
       <div class="panel-head">
         <div>
           <h2>Ключи приватных интеграций</h2>
-          <div class="subtitle">Технический блок ниже кабинета. Адрес возврата берётся из настроек сервера.</div>
+          <div class="subtitle">Для приватных установок, которые мы подключаем вручную. Публичный виджет сюда не попадает.</div>
         </div>
         <button class="secondary" onclick="loadIntegrations()">Обновить список</button>
       </div>
@@ -2401,14 +2458,35 @@ export class BillingService {
         const res=await apiFetch('/billing/admin/integrations');
         if(!res.ok) throw new Error(await res.text());
         state.integrations=await res.json();
+        renderPublicWidget();
         renderIntegrations();
-      }catch(e){ tbody.innerHTML='<tr><td colspan="5"><div class="state">'+escapeHtml(cleanError(e.message))+'</div></td></tr>'; }
+      }catch(e){
+        document.getElementById('publicWidgetStatus').textContent=cleanError(e.message);
+        tbody.innerHTML='<tr><td colspan="5"><div class="state">'+escapeHtml(cleanError(e.message))+'</div></td></tr>';
+      }
+    }
+    function publicIntegration(){
+      return (state.integrations || []).find(function(row){ return row.isDefault === true; }) || null;
+    }
+    function renderPublicWidget(){
+      const row=publicIntegration();
+      document.getElementById('publicWidgetCode').value=row && row.widgetCode || '';
+      document.getElementById('publicClientId').value=row && row.amoClientId || '';
+      document.getElementById('publicDomain').value=row && shortDomain(row.amoDomain || '') || '';
+      document.getElementById('publicClientSecret').value='';
+      document.getElementById('publicWidgetMeta').textContent=row
+        ? 'Сейчас используется '+(row.source==='env'?'ключ из Railway variables':'ключ из базы')+'.'
+        : 'Ключи для виджета, который клиенты ставят сами из amoCRM.';
+      document.getElementById('publicWidgetStatus').textContent=row && row.updatedAt
+        ? 'Обновлено: '+isoToText(row.updatedAt)+'. Секрет скрыт.'
+        : 'Секрет не показывается после сохранения. Адрес возврата берётся из настроек сервера.';
     }
     function renderIntegrations(){
       const tbody=document.querySelector('#integrationsTable tbody');
       tbody.innerHTML='';
-      if(!state.integrations.length){ tbody.innerHTML='<tr><td colspan="5"><div class="state">Пока нет приватных интеграций.</div></td></tr>'; return; }
-      state.integrations.forEach(function(row){
+      const privateIntegrations=(state.integrations || []).filter(function(row){ return row.isDefault !== true; });
+      if(!privateIntegrations.length){ tbody.innerHTML='<tr><td colspan="5"><div class="state">Пока нет приватных интеграций.</div></td></tr>'; return; }
+      privateIntegrations.forEach(function(row){
         const tr=document.createElement('tr');
         tr.innerHTML='<td><b>'+escapeHtml(row.widgetName||'-')+'</b><div class="micro">'+escapeHtml(row.widgetSlug||'-')+'</div></td>'+
           '<td>'+escapeHtml(shortDomain(row.amoDomain||''))+'</td>'+
@@ -2417,6 +2495,31 @@ export class BillingService {
           '<td>'+escapeHtml(isoToText(row.updatedAt))+'</td>';
         tbody.appendChild(tr);
       });
+    }
+    async function savePublicWidget(event){
+      event.preventDefault();
+      const button=document.getElementById('publicSaveButton');
+      button.disabled=true;
+      document.getElementById('publicWidgetStatus').textContent='Сохраняю публичные ключи...';
+      const payload={
+        widgetName:'Копирование сделок',
+        widgetSlug:'copy_leads',
+        widgetCode:document.getElementById('publicWidgetCode').value.trim(),
+        clientId:document.getElementById('publicClientId').value.trim(),
+        clientSecret:document.getElementById('publicClientSecret').value.trim(),
+        amoDomain:document.getElementById('publicDomain').value.trim(),
+        isDefault:true
+      };
+      try{
+        const res=await apiFetch('/billing/admin/integrations',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });
+        if(!res.ok) throw new Error(await res.text());
+        document.getElementById('publicWidgetStatus').textContent='Публичные ключи сохранены.';
+        await loadIntegrations();
+      }catch(e){
+        document.getElementById('publicWidgetStatus').textContent=cleanError(e.message);
+      }finally{
+        button.disabled=false;
+      }
     }
     async function loadAccounts(){
       state.loadingAccounts=true;
@@ -2674,7 +2777,8 @@ export class BillingService {
         amoDomain:document.getElementById('manualDomain').value.trim(),
         widgetCode:document.getElementById('manualWidgetCode').value.trim(),
         clientId:document.getElementById('manualClientId').value.trim(),
-        clientSecret:document.getElementById('manualClientSecret').value.trim()
+        clientSecret:document.getElementById('manualClientSecret').value.trim(),
+        isDefault:false
       };
       try{
         const res=await apiFetch('/billing/admin/integrations',{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(payload) });

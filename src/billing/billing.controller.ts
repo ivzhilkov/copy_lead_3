@@ -230,6 +230,7 @@ export class BillingController {
       clientSecret?: string;
       redirectUri?: string;
       amoDomain?: string;
+      isDefault?: boolean;
     },
   ) {
     await this.ensureAdmin(req);

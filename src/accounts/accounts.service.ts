@@ -193,6 +193,20 @@ export class AccountsService {
     const byClientId = await this.findIntegrationByClientId(amoClientId);
     const current = byWidgetCode || byClientId || null;
 
+    if (data.isDefault === true) {
+      const integrations = await this.findIntegrations();
+      await Promise.all(
+        integrations
+          .filter((integration) => integration.id !== current?.id && integration.isDefault)
+          .map((integration) =>
+            this.integrationsRepo.save({
+              ...integration,
+              isDefault: false,
+            }),
+          ),
+      );
+    }
+
     return this.integrationsRepo.save({
       ...(current || {}),
       ...data,
