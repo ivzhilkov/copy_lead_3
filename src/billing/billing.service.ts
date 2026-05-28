@@ -1760,6 +1760,7 @@ export class BillingService {
         adminName: client.adminName,
         adminEmail: client.adminEmail,
         adminPhone: client.adminPhone,
+        createdAt: this.toIso(client.createdAt),
         billingInn: client.billingInn,
         billingLegalName: client.billingLegalName,
         billingOgrn: client.billingOgrn,
@@ -1788,6 +1789,7 @@ export class BillingService {
         adminName: account.adminName,
         adminEmail: account.adminEmail,
         adminPhone: account.adminPhone,
+        createdAt: this.toIso(account.installedAt),
         billingInn: account.billingInn,
         billingLegalName: account.billingLegalName,
         billingOgrn: account.billingOgrn,
@@ -2292,6 +2294,7 @@ export class BillingService {
         <table id="clientsTable">
           <thead>
             <tr>
+              <th><button class="sort" onclick="setSort('created')">Создано <span class="sortmark" id="sort-created"></span></button></th>
               <th><button class="sort" onclick="setSort('crm')">CRM <span class="sortmark" id="sort-crm"></span></button></th>
               <th><button class="sort" onclick="setSort('domain')">Домен <span class="sortmark" id="sort-domain"></span></button></th>
               <th><button class="sort" onclick="setSort('client')">Клиент <span class="sortmark" id="sort-client"></span></button></th>
@@ -2304,6 +2307,7 @@ export class BillingService {
               <th>Управление</th>
             </tr>
             <tr class="filters">
+              <th><input data-filter="created" oninput="applyTable()" placeholder="Дата/время" /></th>
               <th><select data-filter="crm" onchange="applyTable()"><option value="">Все</option><option value="amo">amo</option></select></th>
               <th><input data-filter="domain" oninput="applyTable()" placeholder="Домен" /></th>
               <th><input data-filter="client" oninput="applyTable()" placeholder="Клиент" /></th>
@@ -2316,7 +2320,7 @@ export class BillingService {
               <th></th>
             </tr>
           </thead>
-          <tbody><tr><td colspan="10"><div class="state"><div class="skeleton"></div></div></td></tr></tbody>
+          <tbody><tr><td colspan="11"><div class="state"><div class="skeleton"></div></div></td></tr></tbody>
         </table>
       </div>
     </section>
@@ -2363,7 +2367,7 @@ export class BillingService {
   </div>
 
   <script>
-    const state = { accounts: [], integrations: [], rows: [], expanded: {}, sortKey: 'expires', sortDir: 'asc', quickFilter: '', loadingAccounts: false };
+    const state = { accounts: [], integrations: [], rows: [], expanded: {}, sortKey: 'created', sortDir: 'desc', quickFilter: '', loadingAccounts: false };
     const sessionKey = 'simplesales_admin_session';
     const loginKey = 'simplesales_admin_login';
     const widgetCatalog = [{ widgetSlug: 'copy_leads', widgetName: 'Копирование сделок' }];
@@ -2374,6 +2378,7 @@ export class BillingService {
     function cleanError(text){ try{ const parsed = JSON.parse(text || '{}'); return parsed.message || text; }catch(e){ return text || 'Ошибка'; } }
     function setStatus(id,text,mode){ const el=document.getElementById(id); if(!el) return; el.textContent=text||''; el.className='status-line'+(mode?' '+mode:''); }
     function isoToText(value){ if(!value) return '-'; const d=new Date(value); if(Number.isNaN(d.getTime())) return value; return d.toLocaleDateString('ru-RU',{timeZone:'Europe/Moscow'}); }
+    function isoToDateTimeText(value){ if(!value) return '-'; const d=new Date(value); if(Number.isNaN(d.getTime())) return value; return d.toLocaleString('ru-RU',{timeZone:'Europe/Moscow',day:'2-digit',month:'2-digit',year:'numeric',hour:'2-digit',minute:'2-digit'}); }
     function dateValue(value){ if(!value) return 0; const d=new Date(value); return Number.isNaN(d.getTime()) ? 0 : d.getTime(); }
     function dateInputValue(value){ if(!value) return ''; const d=new Date(value); if(Number.isNaN(d.getTime())) return ''; const y=d.getFullYear(); const m=String(d.getMonth()+1).padStart(2,'0'); const day=String(d.getDate()).padStart(2,'0'); return y+'-'+m+'-'+day; }
     function shortDomain(value){ return String(value || '').replace(/^https?:\\/\\//i,'').replace(/\\/.*$/,'').replace(/\\.amocrm\\.ru$/i,'').replace(/\\.kommo\\.com$/i,'').replace(/\\.kommo\\.ru$/i,''); }
@@ -2524,7 +2529,7 @@ export class BillingService {
     async function loadAccounts(){
       state.loadingAccounts=true;
       document.getElementById('clientsError').classList.add('hidden');
-      document.querySelector('#clientsTable tbody').innerHTML='<tr><td colspan="10"><div class="state"><div class="skeleton"></div></div></td></tr>';
+      document.querySelector('#clientsTable tbody').innerHTML='<tr><td colspan="11"><div class="state"><div class="skeleton"></div></div></td></tr>';
       try{
         const res=await apiFetch('/billing/admin/accounts');
         if(!res.ok) throw new Error(await res.text());
@@ -2569,6 +2574,8 @@ export class BillingService {
             latestInvoiceCreatedAt: widget.latestInvoiceCreatedAt || '',
             latestInvoicePaidAt: widget.latestInvoicePaidAt || '',
             invoices: widget.invoices || [],
+            created: isoToDateTimeText(client.createdAt || widget.createdAt || widget.installedAt),
+            createdRaw: dateValue(client.createdAt || widget.createdAt || widget.installedAt),
             licenses: Number(client.paidLicensesCount != null ? client.paidLicensesCount : client.usersCount || 0),
             licenseSource: client.usersCountSource || 'stored',
             widget: widget.widgetName || 'Копирование сделок',
@@ -2586,7 +2593,7 @@ export class BillingService {
             firstSeenSource: firstSeenSource,
             accountId: widget.id
           };
-          row.search = normalizeText([row.crm,row.domain,row.client,row.adminName,row.adminEmail,row.adminPhone,row.billingInn,row.billingLegalName,row.latestInvoiceNumber,row.latestInvoiceStatus,row.licenses,row.widget,row.widgetSlug,row.status,row.expires,row.installed,row.uninstalled,row.legacy,row.firstSeenSource].join(' '));
+          row.search = normalizeText([row.created,row.crm,row.domain,row.client,row.adminName,row.adminEmail,row.adminPhone,row.billingInn,row.billingLegalName,row.latestInvoiceNumber,row.latestInvoiceStatus,row.licenses,row.widget,row.widgetSlug,row.status,row.expires,row.installed,row.uninstalled,row.legacy,row.firstSeenSource].join(' '));
           rows.push(row);
         });
       });
@@ -2607,6 +2614,7 @@ export class BillingService {
     function rowValue(row,key){
       if(key==='expires') return row.expiresRaw;
       if(key==='installed') return row.installedRaw;
+      if(key==='created') return row.createdRaw;
       if(key==='licenses') return row.licenses;
       return row[key] || '';
     }
@@ -2656,7 +2664,7 @@ export class BillingService {
       applyTable();
     }
     function updateSortMarks(){
-      ['crm','domain','client','licenses','widget','status','expires','installed','legacy'].forEach(function(key){
+      ['created','crm','domain','client','licenses','widget','status','expires','installed','legacy'].forEach(function(key){
         const el=document.getElementById('sort-'+key);
         if(el) el.textContent=state.sortKey===key?(state.sortDir==='asc'?'↑':'↓'):'';
       });
@@ -2669,11 +2677,12 @@ export class BillingService {
     function renderRows(rows){
       const tbody=document.querySelector('#clientsTable tbody');
       tbody.innerHTML='';
-      if(!rows.length){ tbody.innerHTML='<tr><td colspan="10"><div class="state">Ничего не найдено. Измените поиск или фильтры.</div></td></tr>'; return; }
+      if(!rows.length){ tbody.innerHTML='<tr><td colspan="11"><div class="state">Ничего не найдено. Измените поиск или фильтры.</div></td></tr>'; return; }
       rows.forEach(function(row){
         const opened=state.expanded[row.clientKey]===true;
         const tr=document.createElement('tr');
-        tr.innerHTML='<td><span class="pill amo">'+escapeHtml(row.crm)+'</span></td>'+
+        tr.innerHTML='<td>'+escapeHtml(row.created)+'</td>'+
+          '<td><span class="pill amo">'+escapeHtml(row.crm)+'</span></td>'+
           '<td><div class="domain-main">'+escapeHtml(row.domain||'-')+'</div><div class="micro">ID '+escapeHtml(row.client||'-')+'</div></td>'+
           '<td><button class="secondary client-toggle" onclick="toggleClient(\\''+escapeHtml(row.clientKey)+'\\')">'+(opened?'−':'+')+'</button>'+escapeHtml(row.adminName||'Клиент')+'</td>'+
           '<td><span class="pill">'+escapeHtml(row.licenses)+'</span><div class="micro">'+(row.licenseSource==='amo_paid_active'?'amoCRM':'сохранено')+'</div></td>'+
@@ -2687,7 +2696,7 @@ export class BillingService {
         if(opened){
           const details=document.createElement('tr');
           details.className='details-row';
-          details.innerHTML='<td colspan="10"><div class="details-grid">'+
+          details.innerHTML='<td colspan="11"><div class="details-grid">'+
             '<div><div class="detail-label">Админ</div><div>'+escapeHtml(row.adminName||'-')+'</div></div>'+
             '<div><div class="detail-label">Email</div><div>'+escapeHtml(row.adminEmail||'-')+'</div></div>'+
             '<div><div class="detail-label">Телефон</div><div>'+escapeHtml(row.adminPhone||'-')+'</div></div>'+
