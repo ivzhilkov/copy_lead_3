@@ -78,6 +78,7 @@ export class CopyService {
       normalizedLeadIds.map((leadId) =>
         this.copyQueue.add('copy', {
           accountId: account.amoId,
+          widgetCode: account.widgetCode,
           requestId,
           leadId,
           payload: normalizedPayload,
@@ -89,8 +90,11 @@ export class CopyService {
   }
 
   async processQueueJob(job: CopyJob) {
-    const { accountId, requestId, leadId, payload } = job.data;
-    const account = await this.accountsService.findByAmoId(Number(accountId));
+    const { accountId, widgetCode, requestId, leadId, payload } = job.data;
+    const account = await this.accountsService.findByAmoId(
+      Number(accountId),
+      widgetCode,
+    );
     if (!account) {
       await this.markCopyResult(requestId, {
         sourceLeadId: leadId,
@@ -313,6 +317,17 @@ export class CopyService {
             }
             if (Object.prototype.hasOwnProperty.call(value, 'currency')) {
               mapped.currency = value.currency;
+            }
+            if (Object.prototype.hasOwnProperty.call(value, 'catalog_id')) {
+              mapped.catalog_id = value.catalog_id;
+            }
+            if (
+              Object.prototype.hasOwnProperty.call(
+                value,
+                'catalog_element_id',
+              )
+            ) {
+              mapped.catalog_element_id = value.catalog_element_id;
             }
             return mapped;
           }),
