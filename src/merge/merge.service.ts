@@ -6,18 +6,7 @@ import { AccountsService } from "src/accounts/accounts.service";
 import { Repository } from "typeorm";
 import { MergeHistory } from "./merge-history.entity";
 
-const EDITABLE_NOTE_TYPES = new Set([
-  "common",
-  "call_in",
-  "call_out",
-  "service_message",
-  "message_cashier",
-  "geolocation",
-  "sms_in",
-  "sms_out",
-  "extended_service_message",
-  "attachment",
-]);
+const EDITABLE_NOTE_TYPES = new Set(["common", "attachment"]);
 
 const CHAT_EVENT_TYPES = [
   "incoming_chat_message",
@@ -243,7 +232,11 @@ export class MergeService {
       );
     }
 
-    await this.createMergeSystemNotes(
+    if (canMergeLeads) {
+      await this.deleteEntityOrWarn(api, "leads", pair.deletedLeadId, warnings);
+    }
+
+    await this.createMergeSystemNote(
       api,
       account,
       pair,
@@ -252,22 +245,6 @@ export class MergeService {
       mergedContactIds,
       canMergeLeads,
     );
-
-    if (canMergeLeads) {
-      try {
-        await this.requestWithRetry(() =>
-          api.patch(`/api/v4/leads/${pair.deletedLeadId}`, {
-            is_deleted: true,
-          }),
-        );
-      } catch (e) {
-        warnings.push(
-          `не удалось удалить исходную сделку #${
-            pair.deletedLeadId
-          }: ${this.formatAmoError(e)}`,
-        );
-      }
-    }
 
     await this.historyRepo.save({
       accountId: account.amoId,
@@ -295,9 +272,7 @@ export class MergeService {
       deletedLeadId: canMergeLeads ? pair.deletedLeadId : null,
       contactIds: mergedContactIds,
       warnings,
-      message: warnings.length
-        ? `Объединение выполнено, есть предупреждения: ${warnings.join("; ")}`
-        : "Объединение выполнено. Системные примечания и история записаны.",
+      message: "Объединение выполнено.",
     };
   }
 
@@ -366,12 +341,6 @@ export class MergeService {
       warnings,
     );
     await this.copyLeadTasks(
-      api,
-      pair.deletedLeadId,
-      pair.resultLeadId,
-      warnings,
-    );
-    await this.copyConversationEventsAsNotes(
       api,
       pair.deletedLeadId,
       pair.resultLeadId,
@@ -503,22 +472,7 @@ export class MergeService {
       const duplicateId = Number(duplicate.id);
       await this.moveContactChats(api, duplicateId, survivorId, warnings);
       await this.copyContactNotes(api, duplicateId, survivorId, warnings);
-      await this.safeCreateContactSystemNote(
-        api,
-        survivorId,
-        this.buildContactMergeNoteText(duplicateId, reason, profile),
-      );
-      try {
-        await this.requestWithRetry(() =>
-          api.patch(`/api/v4/contacts/${duplicateId}`, { is_deleted: true }),
-        );
-      } catch (e) {
-        warnings.push(
-          `не удалось удалить контакт #${duplicateId}: ${this.formatAmoError(
-            e,
-          )}`,
-        );
-      }
+      await this.deleteEntityOrWarn(api, "contacts", duplicateId, warnings);
     }
 
     return safeContacts.map((contact) => Number(contact.id));
@@ -675,7 +629,7 @@ export class MergeService {
     return Object.keys(normalized).length ? normalized : null;
   }
 
-  private async createMergeSystemNotes(
+  private async createMergeSystemNote(
     api: AxiosInstance,
     account: Account,
     pair: LeadPair,
@@ -684,27 +638,25 @@ export class MergeService {
     contactIds: number[],
     leadWasDeleted: boolean,
   ) {
-    const user = this.formatProfile(profile);
+    const user = this.formatProfileName(profile);
     const resultUrl = this.getLeadUrl(account.url, pair.resultLeadId);
-    const deletedText = leadWasDeleted
-      ? `Исходная сделка #${pair.deletedLeadId} объединена и удалена.`
-      : `Сделки не удалялись: по роли пользователя выполнялось только объединение контактов.`;
+    const dateText = this.formatTimestamp(Math.floor(Date.now() / 1000));
+    const actionText = leadWasDeleted
+      ? `Сделки #${pair.left.id} и #${pair.right.id} объединены в #${pair.resultLeadId}.`
+      : `Контакты объединены в сделке #${pair.resultLeadId}.`;
     const contactsText = contactIds.length
       ? `Контакты: ${contactIds.map((id) => `#${id}`).join(", ")}.`
       : "Контакты не объединялись.";
     const text = [
-      `Объединение выполнено пользователем: ${user}.`,
-      `Сделки: #${pair.left.id} и #${pair.right.id}.`,
-      `Итоговая сделка: #${pair.resultLeadId} (${resultUrl}).`,
-      deletedText,
+      `Объединил: ${user}.`,
+      `Когда: ${dateText}.`,
+      actionText,
+      `Итоговая сделка: ${resultUrl}.`,
       contactsText,
       `Причина: ${reason}`,
     ].join("\n");
 
     await this.safeCreateLeadSystemNote(api, pair.resultLeadId, text);
-    if (leadWasDeleted) {
-      await this.safeCreateLeadSystemNote(api, pair.deletedLeadId, text);
-    }
   }
 
   private async copyLeadNotes(
@@ -902,6 +854,81 @@ export class MergeService {
     }
   }
 
+  private async deleteEntityOrWarn(
+    api: AxiosInstance,
+    entityType: "leads" | "contacts",
+    entityId: number,
+    warnings: string[],
+  ) {
+    try {
+      const deleted = await this.deleteEntity(api, entityType, entityId);
+      if (!deleted) {
+        warnings.push(
+          `${entityType === "leads" ? "сделка" : "контакт"} #${entityId} не удалён: amoCRM оставила карточку активной`,
+        );
+      }
+    } catch (e) {
+      warnings.push(
+        `не удалось удалить ${entityType === "leads" ? "сделку" : "контакт"} #${entityId}: ${this.formatAmoError(e)}`,
+      );
+    }
+  }
+
+  private async deleteEntity(
+    api: AxiosInstance,
+    entityType: "leads" | "contacts",
+    entityId: number,
+  ) {
+    try {
+      await this.requestWithRetry(() =>
+        api.delete(`/api/v4/${entityType}/${entityId}`),
+      );
+    } catch (deleteError) {
+      const status = (deleteError as AxiosError)?.response?.status;
+      if (![400, 404, 405, 422].includes(Number(status))) throw deleteError;
+
+      await this.requestWithRetry(() =>
+        api.patch(`/api/v4/${entityType}/${entityId}`, {
+          is_deleted: true,
+        }),
+      );
+    }
+
+    await this.sleep(300);
+    return this.isEntityDeleted(api, entityType, entityId);
+  }
+
+  private async isEntityDeleted(
+    api: AxiosInstance,
+    entityType: "leads" | "contacts",
+    entityId: number,
+  ) {
+    try {
+      const { data } = await this.requestWithRetry(() =>
+        api.get(`/api/v4/${entityType}/${entityId}`),
+      );
+      if (data?.is_deleted === true) return true;
+      if (Number(data?.id) === Number(entityId)) return false;
+    } catch (e) {
+      const status = (e as AxiosError)?.response?.status;
+      if ([204, 404].includes(Number(status))) return true;
+      throw e;
+    }
+
+    try {
+      const { data } = await this.requestWithRetry(() =>
+        api.get(`/api/v4/${entityType}/${entityId}`, {
+          params: { with: "only_deleted" },
+        }),
+      );
+      return data?.is_deleted === true;
+    } catch (e) {
+      const status = (e as AxiosError)?.response?.status;
+      if ([204, 404].includes(Number(status))) return true;
+      throw e;
+    }
+  }
+
   private async safeCreateLeadSystemNote(
     api: AxiosInstance,
     leadId: number,
@@ -1037,7 +1064,10 @@ export class MergeService {
             schema?.name || `Поле #${fieldId}`,
             "custom",
             (lead) =>
-              this.formatCustomField(this.findCustomField(lead, fieldId)),
+              this.formatCustomField(
+                this.findCustomField(lead, fieldId),
+                schema,
+              ),
             (lead) => Boolean(this.findCustomField(lead, fieldId)),
             fieldId,
           ),
@@ -1504,6 +1534,14 @@ export class MergeService {
     };
   }
 
+  private formatProfileName(profile: PublicProfilePayload) {
+    return (
+      String(profile?.userName || "")
+        .trim()
+        .replace(/\s+/g, " ") || "Пользователь amoCRM"
+    );
+  }
+
   private formatProfile(profile: PublicProfilePayload) {
     const name = String(profile?.userName || "").trim();
     const id = Number(profile?.userId);
@@ -1533,8 +1571,15 @@ export class MergeService {
     );
   }
 
-  private formatCustomField(field: any) {
+  private formatCustomField(field: any, schema?: any) {
     if (!field) return "";
+    const fieldType = String(
+      field?.field_type ||
+        field?.type ||
+        schema?.type ||
+        schema?.field_type ||
+        "",
+    ).toLowerCase();
     const values = Array.isArray(field?.values) ? field.values : [];
     return values
       .map((item) => {
@@ -1544,11 +1589,47 @@ export class MergeService {
             return `Элемент #${item.catalog_element_id}`;
           return "";
         }
+        if (this.isDateFieldType(fieldType)) {
+          return this.formatCustomFieldDateValue(value, fieldType);
+        }
         if (typeof value === "object") return JSON.stringify(value);
         return String(value);
       })
       .filter(Boolean)
       .join(", ");
+  }
+
+  private isDateFieldType(fieldType: string) {
+    return ["date", "datetime", "date_time", "birthday"].includes(fieldType);
+  }
+
+  private formatCustomFieldDateValue(value: any, fieldType: string) {
+    if (value instanceof Date && Number.isFinite(value.getTime())) {
+      return this.formatDate(
+        value,
+        fieldType !== "date" && fieldType !== "birthday",
+      );
+    }
+
+    const raw = String(value || "").trim();
+    const numeric = Number(raw);
+    if (Number.isFinite(numeric) && numeric > 0) {
+      const millis = numeric > 10_000_000_000 ? numeric : numeric * 1000;
+      return this.formatDate(
+        new Date(millis),
+        fieldType !== "date" && fieldType !== "birthday",
+      );
+    }
+
+    const parsed = new Date(raw);
+    if (Number.isFinite(parsed.getTime())) {
+      return this.formatDate(
+        parsed,
+        fieldType !== "date" && fieldType !== "birthday",
+      );
+    }
+
+    return raw;
   }
 
   private mapCustomFieldValues(values: any[]) {
@@ -1619,16 +1700,25 @@ export class MergeService {
   private formatTimestamp(value: any) {
     const timestamp = Number(value);
     if (!Number.isFinite(timestamp) || timestamp <= 0) return "";
+    return this.formatDate(new Date(timestamp * 1000), true);
+  }
+
+  private formatDate(date: Date, withTime: boolean) {
+    if (!Number.isFinite(date.getTime())) return "";
     return new Intl.DateTimeFormat("ru-RU", {
       timeZone: "Europe/Moscow",
       day: "2-digit",
       month: "2-digit",
       year: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-      hour12: false,
-    }).format(new Date(timestamp * 1000));
+      ...(withTime
+        ? {
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+            hour12: false,
+          }
+        : {}),
+    }).format(date);
   }
 
   private formatMoney(value: any) {
