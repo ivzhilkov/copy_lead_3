@@ -2347,12 +2347,12 @@ export class BillingService {
       <div class="modal-head">
         <div>
           <h2>Добавить пользователя</h2>
-          <div class="subtitle">Пока доступен один виджет. Введите домен, секрет, ID и widget code.</div>
+          <div class="subtitle">Выберите виджет и введите домен, секрет, ID и widget code.</div>
         </div>
         <button class="modal-close" type="button" onclick="closeManualModal()">×</button>
       </div>
       <div class="grid">
-        <div><label for="manualWidget">Виджет</label><select id="manualWidget"><option value="copy_leads">Копирование сделок</option></select></div>
+        <div><label for="manualWidget">Виджет</label><select id="manualWidget"><option value="copy_leads">Копирование сделок</option><option value="merge_leads_contacts">Объединение сделок и контактов</option></select></div>
         <div><label for="manualDomain">Домен</label><input id="manualDomain" placeholder="subdomain или subdomain.amocrm.ru" /></div>
         <div><label for="manualClientId">ID</label><input id="manualClientId" placeholder="Client ID" required /></div>
         <div><label for="manualClientSecret">Секрет</label><input id="manualClientSecret" type="password" placeholder="Client Secret" required /></div>
@@ -2370,7 +2370,10 @@ export class BillingService {
     const state = { accounts: [], integrations: [], rows: [], expanded: {}, sortKey: 'created', sortDir: 'desc', quickFilter: '', loadingAccounts: false };
     const sessionKey = 'simplesales_admin_session';
     const loginKey = 'simplesales_admin_login';
-    const widgetCatalog = [{ widgetSlug: 'copy_leads', widgetName: 'Копирование сделок' }];
+    const widgetCatalog = [
+      { widgetSlug: 'copy_leads', widgetName: 'Копирование сделок' },
+      { widgetSlug: 'merge_leads_contacts', widgetName: 'Объединение сделок и контактов' }
+    ];
 
     function authHeaders(){ return { 'x-admin-session': localStorage.getItem(sessionKey) || '' }; }
     function normalizeText(value){ return String(value == null ? '' : value).toLowerCase().trim(); }
@@ -2779,7 +2782,8 @@ export class BillingService {
       const button=document.getElementById('manualSaveButton');
       button.disabled=true;
       setStatus('manualStatus','Сохраняю...','');
-      const selected=widgetCatalog[0];
+      const selectedSlug=document.getElementById('manualWidget').value;
+      const selected=widgetCatalog.find(function(item){ return item.widgetSlug===selectedSlug; }) || widgetCatalog[0];
       const payload={
         widgetName:selected.widgetName,
         widgetSlug:selected.widgetSlug,
