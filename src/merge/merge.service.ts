@@ -32,6 +32,13 @@ type LeadPair = {
   deletedLeadId: number;
 };
 
+type ContactMergeResult = {
+  contactIds: number[];
+  survivorContactId: number | null;
+  deletedContactIds: number[];
+  pendingContactDeleteIds: number[];
+};
+
 type FieldValueView = {
   leadId: number;
   hasValue: boolean;
@@ -220,9 +227,14 @@ export class MergeService {
       );
     }
 
-    let mergedContactIds: number[] = [];
+    let contactMergeResult: ContactMergeResult = {
+      contactIds: [],
+      survivorContactId: null,
+      deletedContactIds: [],
+      pendingContactDeleteIds: [],
+    };
     if (mergeContacts && selectedContactIds.length) {
-      mergedContactIds = await this.mergeContacts(
+      contactMergeResult = await this.mergeContacts(
         api,
         pair.resultLeadId,
         selectedContactIds,
@@ -232,8 +244,15 @@ export class MergeService {
       );
     }
 
+    const pendingLeadDeleteIds: number[] = [];
     if (canMergeLeads) {
-      await this.deleteEntityOrWarn(api, "leads", pair.deletedLeadId, warnings);
+      const leadDeleted = await this.deleteEntityOrWarn(
+        api,
+        "leads",
+        pair.deletedLeadId,
+        warnings,
+      );
+      if (!leadDeleted) pendingLeadDeleteIds.push(pair.deletedLeadId);
     }
 
     await this.createMergeSystemNote(
@@ -242,7 +261,7 @@ export class MergeService {
       pair,
       reason,
       profile,
-      mergedContactIds,
+      contactMergeResult.contactIds,
       canMergeLeads,
     );
 
@@ -253,7 +272,7 @@ export class MergeService {
       secondaryLeadId: targetLeadId,
       resultLeadId: pair.resultLeadId,
       deletedLeadId: canMergeLeads ? pair.deletedLeadId : null,
-      contactIds: mergedContactIds,
+      contactIds: contactMergeResult.contactIds,
       userName: profile.userName,
       userId: profile.userId,
       reason,
@@ -262,6 +281,9 @@ export class MergeService {
         fieldSources,
         selectedTagKeys,
         mergeContacts,
+        deletedContactIds: contactMergeResult.deletedContactIds,
+        pendingLeadDeleteIds,
+        pendingContactDeleteIds: contactMergeResult.pendingContactDeleteIds,
         warnings,
       },
     });
@@ -270,7 +292,10 @@ export class MergeService {
       ok: true,
       resultLeadId: pair.resultLeadId,
       deletedLeadId: canMergeLeads ? pair.deletedLeadId : null,
-      contactIds: mergedContactIds,
+      contactIds: contactMergeResult.contactIds,
+      deletedContactIds: contactMergeResult.deletedContactIds,
+      pendingLeadDeleteIds,
+      pendingContactDeleteIds: contactMergeResult.pendingContactDeleteIds,
       warnings,
       message: "Объединение выполнено.",
     };
@@ -449,7 +474,14 @@ export class MergeService {
     const safeContacts = contacts.filter((contact) =>
       Number.isFinite(Number(contact?.id)),
     );
-    if (!safeContacts.length) return [];
+    if (!safeContacts.length) {
+      return {
+        contactIds: [],
+        survivorContactId: null,
+        deletedContactIds: [],
+        pendingContactDeleteIds: [],
+      };
+    }
 
     const survivor = [...safeContacts].sort(
       (a, b) => Number(a?.created_at || 0) - Number(b?.created_at || 0),
@@ -468,14 +500,28 @@ export class MergeService {
 
     await this.safeLinkLeadContact(api, resultLeadId, survivorId, warnings);
 
+    const deletedContactIds: number[] = [];
+    const pendingContactDeleteIds: number[] = [];
     for (const duplicate of duplicateContacts) {
       const duplicateId = Number(duplicate.id);
       await this.moveContactChats(api, duplicateId, survivorId, warnings);
       await this.copyContactNotes(api, duplicateId, survivorId, warnings);
-      await this.deleteEntityOrWarn(api, "contacts", duplicateId, warnings);
+      const contactDeleted = await this.deleteEntityOrWarn(
+        api,
+        "contacts",
+        duplicateId,
+        warnings,
+      );
+      if (contactDeleted) deletedContactIds.push(duplicateId);
+      else pendingContactDeleteIds.push(duplicateId);
     }
 
-    return safeContacts.map((contact) => Number(contact.id));
+    return {
+      contactIds: safeContacts.map((contact) => Number(contact.id)),
+      survivorContactId: survivorId,
+      deletedContactIds,
+      pendingContactDeleteIds,
+    };
   }
 
   private buildContactPatch(survivor: any, duplicates: any[]) {
@@ -867,10 +913,12 @@ export class MergeService {
           `${entityType === "leads" ? "сделка" : "контакт"} #${entityId} не удалён: amoCRM оставила карточку активной`,
         );
       }
+      return deleted;
     } catch (e) {
       warnings.push(
         `не удалось удалить ${entityType === "leads" ? "сделку" : "контакт"} #${entityId}: ${this.formatAmoError(e)}`,
       );
+      return false;
     }
   }
 
@@ -879,23 +927,73 @@ export class MergeService {
     entityType: "leads" | "contacts",
     entityId: number,
   ) {
-    try {
-      await this.requestWithRetry(() =>
-        api.delete(`/api/v4/${entityType}/${entityId}`),
-      );
-    } catch (deleteError) {
-      const status = (deleteError as AxiosError)?.response?.status;
-      if (![400, 404, 405, 422].includes(Number(status))) throw deleteError;
+    const attempts: Array<() => Promise<void>> = [
+      () =>
+        this.requestWithRetry(() =>
+          api.delete(`/api/v4/${entityType}/${entityId}`),
+        ).then(() => undefined),
+      () =>
+        this.requestWithRetry(() =>
+          api.delete(`/api/v2/${entityType}/${entityId}`),
+        ).then(() => undefined),
+      () =>
+        this.requestWithRetry(() =>
+          api.patch(`/api/v4/${entityType}`, [
+            {
+              id: entityId,
+              is_deleted: true,
+            },
+          ]),
+        ).then(() => undefined),
+      () =>
+        this.requestWithRetry(() =>
+          api.patch(`/api/v4/${entityType}/${entityId}`, {
+            is_deleted: true,
+          }),
+        ).then(() => undefined),
+      () => this.deleteEntityViaAjax(api, entityType, entityId),
+    ];
 
-      await this.requestWithRetry(() =>
-        api.patch(`/api/v4/${entityType}/${entityId}`, {
-          is_deleted: true,
-        }),
-      );
+    let lastError: unknown = null;
+    for (const attempt of attempts) {
+      try {
+        await attempt();
+        await this.sleep(500);
+        if (await this.isEntityDeleted(api, entityType, entityId)) return true;
+      } catch (e) {
+        lastError = e;
+        const status = (e as AxiosError)?.response?.status;
+        if (![400, 401, 403, 404, 405, 415, 422].includes(Number(status))) {
+          throw e;
+        }
+      }
     }
 
-    await this.sleep(300);
+    if (lastError) {
+      this.logger.warn(
+        `Could not delete ${entityType} #${entityId}: ${this.formatAmoError(lastError)}`,
+      );
+    }
     return this.isEntityDeleted(api, entityType, entityId);
+  }
+
+  private async deleteEntityViaAjax(
+    api: AxiosInstance,
+    entityType: "leads" | "contacts",
+    entityId: number,
+  ) {
+    const body = new URLSearchParams();
+    body.append("ACTION", "DELETE");
+    body.append("ID[]", String(entityId));
+
+    await this.requestWithRetry(() =>
+      api.post(`/ajax/${entityType}/multiple/delete/`, body.toString(), {
+        headers: {
+          "X-Requested-With": "XMLHttpRequest",
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+        },
+      }),
+    );
   }
 
   private async isEntityDeleted(
