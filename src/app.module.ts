@@ -9,6 +9,7 @@ import { ConfigModule } from '@nestjs/config';
 import { config } from './config';
 import { CopyModule } from './copy/copy.module';
 import { BillingModule } from './billing/billing.module';
+import { MergeModule } from './merge/merge.module';
 
 const toNumber = (value: string | undefined, fallback: number) => {
   const parsed = Number(value);
@@ -104,6 +105,7 @@ const redisUrl = parseConnectionUrl(process.env.REDIS_URL);
     AuthModule,
     CopyModule,
     BillingModule,
+    MergeModule,
   ],
   controllers: [AppController],
   providers: [AppService],
