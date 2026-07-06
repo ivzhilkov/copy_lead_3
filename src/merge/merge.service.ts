@@ -2874,8 +2874,27 @@ export class MergeService {
     const raw = value?.value;
     if (raw === null || raw === undefined || raw === "") return "";
     const text = typeof raw === "object" ? JSON.stringify(raw) : String(raw);
-    const enumText = String(value?.enum || value?.enum_code || "").trim();
+    const enumText = this.translateCustomValueEnum(value);
     return enumText ? `${text} · ${enumText}` : text;
+  }
+
+  private translateCustomValueEnum(value: any) {
+    const raw = String(value?.enum || value?.enum_code || "").trim();
+    if (!raw) return "";
+
+    const labels: Record<string, string> = {
+      WORK: "Рабочий",
+      WORKDD: "Рабочий прямой",
+      MOB: "Мобильный",
+      MOBILE: "Мобильный",
+      HOME: "Домашний",
+      FAX: "Факс",
+      OTHER: "Другой",
+      PRIV: "Личный",
+      PRIVATE: "Личный",
+    };
+
+    return labels[raw.toUpperCase()] || raw;
   }
 
   private formatCustomField(field: any, schema?: any) {
