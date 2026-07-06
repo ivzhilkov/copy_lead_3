@@ -66,13 +66,13 @@ export class MergeService {
   constructor(
     private readonly accountsService: AccountsService,
     @InjectRepository(MergeHistory)
-    private readonly historyRepo: Repository<MergeHistory>,
+    private readonly historyRepo: Repository<MergeHistory>
   ) {}
 
   async searchLeads(account: Account, sourceLeadIdRaw: number, query: string) {
     const sourceLeadId = this.normalizeId(
       sourceLeadIdRaw,
-      "Некорректный ID текущей сделки",
+      "Некорректный ID текущей сделки"
     );
     const normalizedQuery = String(query || "").trim();
     if (normalizedQuery.length < 2) return { items: [] };
@@ -99,7 +99,7 @@ export class MergeService {
             limit: 10,
             with: "contacts",
           },
-        }),
+        })
       ).then(({ data }) => data);
 
       const leads = data?._embedded?.leads || [];
@@ -117,15 +117,15 @@ export class MergeService {
   async buildPreview(
     account: Account,
     sourceLeadIdRaw: number,
-    targetLeadIdRaw: number,
+    targetLeadIdRaw: number
   ) {
     const sourceLeadId = this.normalizeId(
       sourceLeadIdRaw,
-      "Некорректный ID текущей сделки",
+      "Некорректный ID текущей сделки"
     );
     const targetLeadId = this.normalizeId(
       targetLeadIdRaw,
-      "Некорректный ID второй сделки",
+      "Некорректный ID второй сделки"
     );
     if (sourceLeadId === targetLeadId) {
       throw new BadRequestException("Нужно выбрать другую сделку");
@@ -162,11 +162,11 @@ export class MergeService {
   async execute(account: Account, body: any) {
     const sourceLeadId = this.normalizeId(
       body?.source_lead_id,
-      "Некорректный ID текущей сделки",
+      "Некорректный ID текущей сделки"
     );
     const targetLeadId = this.normalizeId(
       body?.target_lead_id,
-      "Некорректный ID второй сделки",
+      "Некорректный ID второй сделки"
     );
     if (sourceLeadId === targetLeadId) {
       throw new BadRequestException("Нужно выбрать другую сделку");
@@ -175,7 +175,7 @@ export class MergeService {
     const reason = String(body?.reason || "").trim();
     if (reason.length < 4) {
       throw new BadRequestException(
-        "Укажите причину объединения, минимум 4 символа",
+        "Укажите причину объединения, минимум 4 символа"
       );
     }
 
@@ -223,7 +223,7 @@ export class MergeService {
         selectedTagKeys,
         reason,
         profile,
-        warnings,
+        warnings
       );
     }
 
@@ -240,7 +240,7 @@ export class MergeService {
         selectedContactIds,
         reason,
         profile,
-        warnings,
+        warnings
       );
     }
 
@@ -250,7 +250,7 @@ export class MergeService {
         api,
         "leads",
         pair.deletedLeadId,
-        warnings,
+        warnings
       );
       if (!leadDeleted) pendingLeadDeleteIds.push(pair.deletedLeadId);
     }
@@ -262,7 +262,7 @@ export class MergeService {
       reason,
       profile,
       contactMergeResult.contactIds,
-      canMergeLeads,
+      canMergeLeads
     );
 
     await this.historyRepo.save({
@@ -343,18 +343,18 @@ export class MergeService {
     selectedTagKeys: string[],
     reason: string,
     profile: PublicProfilePayload,
-    warnings: string[],
+    warnings: string[]
   ) {
     const patch = this.buildLeadPatch(
       pair,
       customFields,
       fieldSources,
-      selectedTagKeys,
+      selectedTagKeys
     );
 
     if (Object.keys(patch).length) {
       await this.requestWithRetry(() =>
-        api.patch(`/api/v4/leads/${pair.resultLeadId}`, patch),
+        api.patch(`/api/v4/leads/${pair.resultLeadId}`, patch)
       );
     }
 
@@ -363,19 +363,19 @@ export class MergeService {
       api,
       pair.deletedLeadId,
       pair.resultLeadId,
-      warnings,
+      warnings
     );
     await this.copyLeadTasks(
       api,
       pair.deletedLeadId,
       pair.resultLeadId,
-      warnings,
+      warnings
     );
 
     this.logger.log(
       `Merged leads ${pair.left.id}/${pair.right.id} -> ${
         pair.resultLeadId
-      }. User=${profile.userName || profile.userId || "-"}`,
+      }. User=${profile.userName || profile.userId || "-"}`
     );
   }
 
@@ -383,7 +383,7 @@ export class MergeService {
     pair: LeadPair,
     customFields: Map<number, any>,
     fieldSources: Record<string, number>,
-    selectedTagKeys: string[],
+    selectedTagKeys: string[]
   ) {
     const byId = new Map<number, any>([
       [Number(pair.left.id), pair.left],
@@ -445,13 +445,13 @@ export class MergeService {
     }
 
     const selectedTags = this.buildTagsPreview(pair).filter((tag) =>
-      selectedTagKeys.includes(tag.key),
+      selectedTagKeys.includes(tag.key)
     );
     if (selectedTags.length) {
       patch.tags_to_add = selectedTags.map((tag) =>
         Number.isFinite(Number(tag.id)) && Number(tag.id) > 0
           ? { id: Number(tag.id) }
-          : { name: tag.name },
+          : { name: tag.name }
       );
     }
 
@@ -464,15 +464,15 @@ export class MergeService {
     selectedContactIds: number[],
     reason: string,
     profile: PublicProfilePayload,
-    warnings: string[],
+    warnings: string[]
   ) {
     const contacts = await Promise.all(
       Array.from(new Set(selectedContactIds)).map((contactId) =>
-        this.getContact(api, contactId),
-      ),
+        this.getContact(api, contactId)
+      )
     );
     const safeContacts = contacts.filter((contact) =>
-      Number.isFinite(Number(contact?.id)),
+      Number.isFinite(Number(contact?.id))
     );
     if (!safeContacts.length) {
       return {
@@ -484,17 +484,17 @@ export class MergeService {
     }
 
     const survivor = [...safeContacts].sort(
-      (a, b) => Number(a?.created_at || 0) - Number(b?.created_at || 0),
+      (a, b) => Number(a?.created_at || 0) - Number(b?.created_at || 0)
     )[0];
     const survivorId = Number(survivor.id);
     const duplicateContacts = safeContacts.filter(
-      (contact) => Number(contact.id) !== survivorId,
+      (contact) => Number(contact.id) !== survivorId
     );
 
     const patch = this.buildContactPatch(survivor, duplicateContacts);
     if (Object.keys(patch).length) {
       await this.requestWithRetry(() =>
-        api.patch(`/api/v4/contacts/${survivorId}`, patch),
+        api.patch(`/api/v4/contacts/${survivorId}`, patch)
       );
     }
 
@@ -510,7 +510,7 @@ export class MergeService {
         api,
         "contacts",
         duplicateId,
-        warnings,
+        warnings
       );
       if (contactDeleted) deletedContactIds.push(duplicateId);
       else pendingContactDeleteIds.push(duplicateId);
@@ -545,7 +545,7 @@ export class MergeService {
       .map((tag) =>
         Number.isFinite(Number(tag.id)) && Number(tag.id) > 0
           ? { id: Number(tag.id) }
-          : { name: tag.name },
+          : { name: tag.name }
       );
     if (tagsToAdd.length) patch.tags_to_add = tagsToAdd;
 
@@ -576,16 +576,16 @@ export class MergeService {
 
         const isMulti =
           /multi/i.test(
-            String(existing.field_type || field.field_type || ""),
+            String(existing.field_type || field.field_type || "")
           ) ||
           ["PHONE", "EMAIL", "IM"].includes(
-            String(existing.field_code || field.field_code || ""),
+            String(existing.field_code || field.field_code || "")
           );
 
         if (!isMulti && existing.values.length) return;
 
         const seen = new Set(
-          existing.values.map((value) => JSON.stringify(value)),
+          existing.values.map((value) => JSON.stringify(value))
         );
         values.forEach((value) => {
           const key = JSON.stringify(value);
@@ -601,14 +601,14 @@ export class MergeService {
         field_id,
         field_code,
         values,
-      }),
+      })
     );
   }
 
   private async linkEntitiesFromDeletedLead(
     api: AxiosInstance,
     pair: LeadPair,
-    warnings: string[],
+    warnings: string[]
   ) {
     const links = await this.getEntityLinks(api, "leads", pair.deletedLeadId);
     const payload = links
@@ -627,13 +627,13 @@ export class MergeService {
       if (!chunk.length) continue;
       try {
         await this.requestWithRetry(() =>
-          api.post(`/api/v4/leads/${pair.resultLeadId}/link`, chunk),
+          api.post(`/api/v4/leads/${pair.resultLeadId}/link`, chunk)
         );
       } catch (e) {
         warnings.push(
           `не удалось перенести часть связей сделки #${
             pair.deletedLeadId
-          }: ${this.formatAmoError(e)}`,
+          }: ${this.formatAmoError(e)}`
         );
       }
     }
@@ -682,7 +682,7 @@ export class MergeService {
     reason: string,
     profile: PublicProfilePayload,
     contactIds: number[],
-    leadWasDeleted: boolean,
+    leadWasDeleted: boolean
   ) {
     const user = this.formatProfileName(profile);
     const resultUrl = this.getLeadUrl(account.url, pair.resultLeadId);
@@ -709,7 +709,7 @@ export class MergeService {
     api: AxiosInstance,
     sourceLeadId: number,
     targetLeadId: number,
-    warnings: string[],
+    warnings: string[]
   ) {
     try {
       const notes = await this.getAllEntityNotes(api, "leads", sourceLeadId);
@@ -720,8 +720,8 @@ export class MergeService {
     } catch (e) {
       warnings.push(
         `не удалось перенести примечания сделки #${sourceLeadId}: ${this.formatAmoError(
-          e,
-        )}`,
+          e
+        )}`
       );
     }
   }
@@ -730,13 +730,13 @@ export class MergeService {
     api: AxiosInstance,
     sourceContactId: number,
     targetContactId: number,
-    warnings: string[],
+    warnings: string[]
   ) {
     try {
       const notes = await this.getAllEntityNotes(
         api,
         "contacts",
-        sourceContactId,
+        sourceContactId
       );
       const bodies = notes
         .filter((note) => EDITABLE_NOTE_TYPES.has(note.note_type))
@@ -745,8 +745,8 @@ export class MergeService {
     } catch (e) {
       warnings.push(
         `не удалось перенести примечания контакта #${sourceContactId}: ${this.formatAmoError(
-          e,
-        )}`,
+          e
+        )}`
       );
     }
   }
@@ -755,7 +755,7 @@ export class MergeService {
     api: AxiosInstance,
     sourceLeadId: number,
     targetLeadId: number,
-    warnings: string[],
+    warnings: string[]
   ) {
     try {
       const tasks = await this.getLeadTasks(api, sourceLeadId);
@@ -773,7 +773,7 @@ export class MergeService {
             ? Number(task.task_type_id)
             : undefined,
           responsible_user_id: Number.isFinite(
-            Number(task?.responsible_user_id),
+            Number(task?.responsible_user_id)
           )
             ? Number(task.responsible_user_id)
             : undefined,
@@ -787,8 +787,8 @@ export class MergeService {
     } catch (e) {
       warnings.push(
         `не удалось перенести задачи сделки #${sourceLeadId}: ${this.formatAmoError(
-          e,
-        )}`,
+          e
+        )}`
       );
     }
   }
@@ -797,7 +797,7 @@ export class MergeService {
     api: AxiosInstance,
     sourceLeadId: number,
     targetLeadId: number,
-    warnings: string[],
+    warnings: string[]
   ) {
     try {
       const events = await this.getEntityChatEvents(api, "lead", [
@@ -805,7 +805,7 @@ export class MergeService {
       ]);
       const bodies = events
         .filter((event) =>
-          CHAT_EVENT_TYPES.includes(String(event?.type || "") as any),
+          CHAT_EVENT_TYPES.includes(String(event?.type || "") as any)
         )
         .map((event) => this.mapChatEventToServiceNote(event))
         .filter(Boolean);
@@ -813,8 +813,8 @@ export class MergeService {
     } catch (e) {
       warnings.push(
         `не удалось перенести историю бесед сделки #${sourceLeadId}: ${this.formatAmoError(
-          e,
-        )}`,
+          e
+        )}`
       );
     }
   }
@@ -828,8 +828,8 @@ export class MergeService {
       type === "incoming_chat_message"
         ? "Беседа: входящее сообщение"
         : type === "outgoing_chat_message"
-          ? "Беседа: исходящее сообщение"
-          : "Беседа: внутреннее сообщение";
+        ? "Беседа: исходящее сообщение"
+        : "Беседа: внутреннее сообщение";
 
     return {
       note_type: "service_message",
@@ -844,13 +844,13 @@ export class MergeService {
     api: AxiosInstance,
     sourceContactId: number,
     targetContactId: number,
-    warnings: string[],
+    warnings: string[]
   ) {
     try {
       const data = await this.requestWithRetry(() =>
         api.get("/api/v4/contacts/chats", {
           params: { "contact_id[]": sourceContactId },
-        }),
+        })
       ).then(({ data }) => data);
       const chats = data?._embedded?.chats || [];
       const payload = chats
@@ -863,14 +863,14 @@ export class MergeService {
       for (const chunk of this.chunk(payload, 50)) {
         if (!chunk.length) continue;
         await this.requestWithRetry(() =>
-          api.post("/api/v4/contacts/chats", chunk),
+          api.post("/api/v4/contacts/chats", chunk)
         );
       }
     } catch (e) {
       warnings.push(
         `не удалось перенести чаты контакта #${sourceContactId}: ${this.formatAmoError(
-          e,
-        )}`,
+          e
+        )}`
       );
     }
   }
@@ -879,7 +879,7 @@ export class MergeService {
     api: AxiosInstance,
     leadId: number,
     contactId: number,
-    warnings: string[],
+    warnings: string[]
   ) {
     try {
       await this.requestWithRetry(() =>
@@ -889,13 +889,13 @@ export class MergeService {
             to_entity_type: "contacts",
             metadata: { is_main: true },
           },
-        ]),
+        ])
       );
     } catch (e) {
       warnings.push(
         `не удалось привязать итоговый контакт #${contactId} к сделке #${leadId}: ${this.formatAmoError(
-          e,
-        )}`,
+          e
+        )}`
       );
     }
   }
@@ -904,19 +904,23 @@ export class MergeService {
     api: AxiosInstance,
     entityType: "leads" | "contacts",
     entityId: number,
-    warnings: string[],
+    warnings: string[]
   ) {
     try {
       const deleted = await this.deleteEntity(api, entityType, entityId);
       if (!deleted) {
         warnings.push(
-          `${entityType === "leads" ? "сделка" : "контакт"} #${entityId} не удалён: amoCRM оставила карточку активной`,
+          `${
+            entityType === "leads" ? "сделка" : "контакт"
+          } #${entityId} не удалён: amoCRM оставила карточку активной`
         );
       }
       return deleted;
     } catch (e) {
       warnings.push(
-        `не удалось удалить ${entityType === "leads" ? "сделку" : "контакт"} #${entityId}: ${this.formatAmoError(e)}`,
+        `не удалось удалить ${
+          entityType === "leads" ? "сделку" : "контакт"
+        } #${entityId}: ${this.formatAmoError(e)}`
       );
       return false;
     }
@@ -925,16 +929,16 @@ export class MergeService {
   private async deleteEntity(
     api: AxiosInstance,
     entityType: "leads" | "contacts",
-    entityId: number,
+    entityId: number
   ) {
     const attempts: Array<() => Promise<void>> = [
       () =>
         this.requestWithRetry(() =>
-          api.delete(`/api/v4/${entityType}/${entityId}`),
+          api.delete(`/api/v4/${entityType}/${entityId}`)
         ).then(() => undefined),
       () =>
         this.requestWithRetry(() =>
-          api.delete(`/api/v2/${entityType}/${entityId}`),
+          api.delete(`/api/v2/${entityType}/${entityId}`)
         ).then(() => undefined),
       () =>
         this.requestWithRetry(() =>
@@ -943,13 +947,13 @@ export class MergeService {
               id: entityId,
               is_deleted: true,
             },
-          ]),
+          ])
         ).then(() => undefined),
       () =>
         this.requestWithRetry(() =>
           api.patch(`/api/v4/${entityType}/${entityId}`, {
             is_deleted: true,
-          }),
+          })
         ).then(() => undefined),
       () => this.deleteEntityViaAjax(api, entityType, entityId),
     ];
@@ -971,7 +975,9 @@ export class MergeService {
 
     if (lastError) {
       this.logger.warn(
-        `Could not delete ${entityType} #${entityId}: ${this.formatAmoError(lastError)}`,
+        `Could not delete ${entityType} #${entityId}: ${this.formatAmoError(
+          lastError
+        )}`
       );
     }
     return this.isEntityDeleted(api, entityType, entityId);
@@ -980,7 +986,7 @@ export class MergeService {
   private async deleteEntityViaAjax(
     api: AxiosInstance,
     entityType: "leads" | "contacts",
-    entityId: number,
+    entityId: number
   ) {
     const body = new URLSearchParams();
     body.append("ACTION", "DELETE");
@@ -992,18 +998,18 @@ export class MergeService {
           "X-Requested-With": "XMLHttpRequest",
           "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
         },
-      }),
+      })
     );
   }
 
   private async isEntityDeleted(
     api: AxiosInstance,
     entityType: "leads" | "contacts",
-    entityId: number,
+    entityId: number
   ) {
     try {
       const { data } = await this.requestWithRetry(() =>
-        api.get(`/api/v4/${entityType}/${entityId}`),
+        api.get(`/api/v4/${entityType}/${entityId}`)
       );
       if (data?.is_deleted === true) return true;
       if (Number(data?.id) === Number(entityId)) return false;
@@ -1017,7 +1023,7 @@ export class MergeService {
       const { data } = await this.requestWithRetry(() =>
         api.get(`/api/v4/${entityType}/${entityId}`, {
           params: { with: "only_deleted" },
-        }),
+        })
       );
       return data?.is_deleted === true;
     } catch (e) {
@@ -1030,7 +1036,7 @@ export class MergeService {
   private async safeCreateLeadSystemNote(
     api: AxiosInstance,
     leadId: number,
-    text: string,
+    text: string
   ) {
     try {
       await this.requestWithRetry(() =>
@@ -1042,13 +1048,13 @@ export class MergeService {
               text,
             },
           },
-        ]),
+        ])
       );
     } catch (e) {
       this.logger.warn(
         `Не удалось создать системное примечание для сделки ${leadId}: ${this.formatAmoError(
-          e,
-        )}`,
+          e
+        )}`
       );
     }
   }
@@ -1056,7 +1062,7 @@ export class MergeService {
   private async safeCreateContactSystemNote(
     api: AxiosInstance,
     contactId: number,
-    text: string,
+    text: string
   ) {
     try {
       await this.requestWithRetry(() =>
@@ -1068,13 +1074,13 @@ export class MergeService {
               text,
             },
           },
-        ]),
+        ])
       );
     } catch (e) {
       this.logger.warn(
         `Не удалось создать системное примечание для контакта ${contactId}: ${this.formatAmoError(
-          e,
-        )}`,
+          e
+        )}`
       );
     }
   }
@@ -1083,7 +1089,7 @@ export class MergeService {
     pair: LeadPair,
     customFields: Map<number, any>,
     users: Map<number, string>,
-    statuses: Map<string, string>,
+    statuses: Map<string, string>
   ): FieldRow[] {
     const baseRows: Array<{
       key: string;
@@ -1135,8 +1141,8 @@ export class MergeService {
         row.label,
         "base",
         row.getDisplay,
-        row.hasValue,
-      ),
+        row.hasValue
+      )
     );
 
     const customFieldIds = new Set<number>();
@@ -1164,16 +1170,16 @@ export class MergeService {
             (lead) =>
               this.formatCustomField(
                 this.findCustomField(lead, fieldId),
-                schema,
+                schema
               ),
             (lead) => Boolean(this.findCustomField(lead, fieldId)),
-            fieldId,
-          ),
+            fieldId
+          )
         );
       });
 
     return rows.filter(
-      (row) => row.values.left.hasValue || row.values.right.hasValue,
+      (row) => row.values.left.hasValue || row.values.right.hasValue
     );
   }
 
@@ -1184,7 +1190,7 @@ export class MergeService {
     type: "base" | "custom",
     getDisplay: (lead: any) => string,
     hasValueFn?: (lead: any) => boolean,
-    customFieldId?: number,
+    customFieldId?: number
   ): FieldRow {
     const leftDisplay = getDisplay(pair.left);
     const rightDisplay = getDisplay(pair.right);
@@ -1201,8 +1207,8 @@ export class MergeService {
     const fallbackLeadId = leftHasValue
       ? Number(pair.left.id)
       : rightHasValue
-        ? Number(pair.right.id)
-        : null;
+      ? Number(pair.right.id)
+      : null;
 
     return {
       key,
@@ -1234,8 +1240,8 @@ export class MergeService {
           ? Number(left.id)
           : Number(right.id)
         : Number(left.id) <= Number(right.id)
-          ? Number(left.id)
-          : Number(right.id);
+        ? Number(left.id)
+        : Number(right.id);
     const resultLeadId = olderLeadId;
     const deletedLeadId =
       resultLeadId === Number(left.id) ? Number(right.id) : Number(left.id);
@@ -1252,7 +1258,7 @@ export class MergeService {
   private toPreviewLead(
     lead: any,
     users: Map<number, string>,
-    statuses: Map<string, string>,
+    statuses: Map<string, string>
   ) {
     return {
       id: Number(lead.id),
@@ -1296,7 +1302,7 @@ export class MergeService {
       });
     });
     return Array.from(tags.values()).sort((a, b) =>
-      a.name.localeCompare(b.name, "ru"),
+      a.name.localeCompare(b.name, "ru")
     );
   }
 
@@ -1306,9 +1312,9 @@ export class MergeService {
         [pair.left, pair.right].flatMap((lead) =>
           (lead?._embedded?.contacts || [])
             .map((contact) => Number(contact?.id))
-            .filter((id) => Number.isFinite(id) && id > 0),
-        ),
-      ),
+            .filter((id) => Number.isFinite(id) && id > 0)
+        )
+      )
     );
 
     const contacts = await Promise.all(
@@ -1318,7 +1324,7 @@ export class MergeService {
         } catch (e) {
           return { id: contactId, name: `Контакт #${contactId}` };
         }
-      }),
+      })
     );
 
     return contacts
@@ -1337,7 +1343,7 @@ export class MergeService {
   private contactSummary(contact: any) {
     const values = (contact?.custom_fields_values || [])
       .flatMap((field) =>
-        (field?.values || []).map((value) => String(value?.value || "").trim()),
+        (field?.values || []).map((value) => String(value?.value || "").trim())
       )
       .filter(Boolean);
     return (
@@ -1350,7 +1356,7 @@ export class MergeService {
     return this.requestWithRetry(() =>
       api.get(`/api/v4/leads/${leadId}`, {
         params: { with: "contacts,companies,tags,catalog_elements" },
-      }),
+      })
     ).then(({ data }) => data);
   }
 
@@ -1358,13 +1364,13 @@ export class MergeService {
     return this.requestWithRetry(() =>
       api.get(`/api/v4/contacts/${contactId}`, {
         params: { with: "leads,customers,catalog_elements" },
-      }),
+      })
     ).then(({ data }) => data);
   }
 
   private async getCustomFields(api: AxiosInstance) {
     const data = await this.requestWithRetry(() =>
-      api.get("/api/v4/leads/custom_fields", { params: { limit: 250 } }),
+      api.get("/api/v4/leads/custom_fields", { params: { limit: 250 } })
     ).then(({ data }) => data);
     const map = new Map<number, any>();
     (data?._embedded?.custom_fields || []).forEach((field) => {
@@ -1381,7 +1387,7 @@ export class MergeService {
       const limit = 250;
       while (true) {
         const data = await this.requestWithRetry(() =>
-          api.get("/api/v4/users", { params: { page, limit } }),
+          api.get("/api/v4/users", { params: { page, limit } })
         ).then(({ data }) => data);
         const users = data?._embedded?.users || [];
         users.forEach((user) => {
@@ -1393,7 +1399,7 @@ export class MergeService {
       }
     } catch (e) {
       this.logger.warn(
-        `Не удалось загрузить пользователей amoCRM: ${this.formatAmoError(e)}`,
+        `Не удалось загрузить пользователей amoCRM: ${this.formatAmoError(e)}`
       );
     }
     return map;
@@ -1405,20 +1411,20 @@ export class MergeService {
       const data = await this.requestWithRetry(() =>
         api.get("/api/v4/leads/pipelines", {
           params: { with: "statuses", limit: 250 },
-        }),
+        })
       ).then(({ data }) => data);
       const pipelines = data?._embedded?.pipelines || [];
       pipelines.forEach((pipeline) => {
         (pipeline?._embedded?.statuses || []).forEach((status) => {
           map.set(
             `${pipeline.id}_${status.id}`,
-            `${pipeline.name} / ${status.name}`,
+            `${pipeline.name} / ${status.name}`
           );
         });
       });
     } catch (e) {
       this.logger.warn(
-        `Не удалось загрузить статусы amoCRM: ${this.formatAmoError(e)}`,
+        `Не удалось загрузить статусы amoCRM: ${this.formatAmoError(e)}`
       );
     }
     return map;
@@ -1427,7 +1433,7 @@ export class MergeService {
   private async getEntityLinks(
     api: AxiosInstance,
     entityType: "leads" | "contacts",
-    entityId: number,
+    entityId: number
   ) {
     const links: any[] = [];
     let page = 1;
@@ -1436,7 +1442,7 @@ export class MergeService {
       const data = await this.requestWithRetry(() =>
         api.get(`/api/v4/${entityType}/${entityId}/links`, {
           params: { page, limit },
-        }),
+        })
       ).then(({ data }) => data);
       const current = data?._embedded?.links || [];
       links.push(...current);
@@ -1460,7 +1466,7 @@ export class MergeService {
             "filter[entity_id]": leadId,
             "order[id]": "asc",
           },
-        }),
+        })
       ).then(({ data }) => data);
       const current = data?._embedded?.tasks || [];
       tasks.push(...current);
@@ -1473,7 +1479,7 @@ export class MergeService {
   private async getAllEntityNotes(
     api: AxiosInstance,
     entityType: "leads" | "contacts",
-    entityId: number,
+    entityId: number
   ) {
     const notes: any[] = [];
     const limit = 250;
@@ -1482,7 +1488,7 @@ export class MergeService {
       const data = await this.requestWithRetry(() =>
         api.get(`/api/v4/${entityType}/${entityId}/notes`, {
           params: { page, limit, with: "is_pinned" },
-        }),
+        })
       ).then(({ data }) => data);
       const current = data?._embedded?.notes || [];
       notes.push(...current);
@@ -1512,12 +1518,12 @@ export class MergeService {
     api: AxiosInstance,
     entityType: "leads" | "contacts",
     entityId: number,
-    noteBodies: any[],
+    noteBodies: any[]
   ) {
     for (const chunk of this.chunk(noteBodies, 100)) {
       if (!chunk.length) continue;
       await this.requestWithRetry(() =>
-        api.post(`/api/v4/${entityType}/${entityId}/notes`, chunk),
+        api.post(`/api/v4/${entityType}/${entityId}/notes`, chunk)
       );
     }
   }
@@ -1525,14 +1531,14 @@ export class MergeService {
   private async getEntityChatEvents(
     api: AxiosInstance,
     entity: "lead" | "contact",
-    entityIds: number[],
+    entityIds: number[]
   ) {
     const normalizedEntityIds = Array.from(
       new Set(
         (entityIds || [])
           .map((id) => Number(id))
-          .filter((id) => Number.isFinite(id) && id > 0),
-      ),
+          .filter((id) => Number.isFinite(id) && id > 0)
+      )
     );
     if (!normalizedEntityIds.length) return [];
 
@@ -1553,12 +1559,12 @@ export class MergeService {
               "filter[type]": eventType,
               "filter[entity_id][]": normalizedEntityIds,
             },
-          }),
+          })
         ).then(({ data }) => data);
         const current = data?._embedded?.events || [];
         current.forEach((event) => {
           const key = String(
-            event?.id || `${event?.type}:${event?.created_at}`,
+            event?.id || `${event?.type}:${event?.created_at}`
           );
           if (key) eventsById.set(key, event);
         });
@@ -1569,19 +1575,33 @@ export class MergeService {
 
     return Array.from(eventsById.values()).sort(
       (left, right) =>
-        Number(left?.created_at || 0) - Number(right?.created_at || 0),
+        Number(left?.created_at || 0) - Number(right?.created_at || 0)
     );
   }
 
   private createApi(account: Account) {
     const api = this.accountsService.createConnector(
       account.amoId,
-      account.widgetCode,
+      account.widgetCode
     );
     api.interceptors.request.use(async (config) => {
       await this.waitForAmoSlot(account.amoId);
       return config;
     });
+    api.interceptors.response.use(
+      (response) => response,
+      (error) => {
+        const config = (error as AxiosError)?.config || {};
+        this.logger.warn(
+          `amoCRM merge request failed account=${account.amoId} method=${String(
+            config.method || ""
+          ).toUpperCase()} url=${config.url || "-"}: ${this.formatAmoError(
+            error
+          )}`
+        );
+        return Promise.reject(error);
+      }
+    );
     return api;
   }
 
@@ -1615,7 +1635,7 @@ export class MergeService {
         const id = Number(leadId);
         if (!key || !Number.isFinite(id) || id <= 0) return;
         result[key] = Math.floor(id);
-      },
+      }
     );
     return result;
   }
@@ -1665,7 +1685,7 @@ export class MergeService {
 
   private findCustomField(lead: any, fieldId: number) {
     return (lead?.custom_fields_values || []).find(
-      (field) => Number(field?.field_id) === Number(fieldId),
+      (field) => Number(field?.field_id) === Number(fieldId)
     );
   }
 
@@ -1676,7 +1696,7 @@ export class MergeService {
         field?.type ||
         schema?.type ||
         schema?.field_type ||
-        "",
+        ""
     ).toLowerCase();
     const values = Array.isArray(field?.values) ? field.values : [];
     return values
@@ -1705,7 +1725,7 @@ export class MergeService {
     if (value instanceof Date && Number.isFinite(value.getTime())) {
       return this.formatDate(
         value,
-        fieldType !== "date" && fieldType !== "birthday",
+        fieldType !== "date" && fieldType !== "birthday"
       );
     }
 
@@ -1715,7 +1735,7 @@ export class MergeService {
       const millis = numeric > 10_000_000_000 ? numeric : numeric * 1000;
       return this.formatDate(
         new Date(millis),
-        fieldType !== "date" && fieldType !== "birthday",
+        fieldType !== "date" && fieldType !== "birthday"
       );
     }
 
@@ -1723,7 +1743,7 @@ export class MergeService {
     if (Number.isFinite(parsed.getTime())) {
       return this.formatDate(
         parsed,
-        fieldType !== "date" && fieldType !== "birthday",
+        fieldType !== "date" && fieldType !== "birthday"
       );
     }
 
@@ -1737,7 +1757,6 @@ export class MergeService {
         [
           "value",
           "enum_id",
-          "enum_code",
           "currency",
           "catalog_id",
           "catalog_element_id",
@@ -1776,7 +1795,7 @@ export class MergeService {
   private buildContactMergeNoteText(
     duplicateContactId: number,
     reason: string,
-    profile: PublicProfilePayload,
+    profile: PublicProfilePayload
   ) {
     return [
       `Контакт #${duplicateContactId} объединён с этим контактом.`,
@@ -1837,7 +1856,7 @@ export class MergeService {
     const message = (error as Error)?.message || "unknown error";
     if (!status && !data) return message;
     return `${message}; status=${status || "-"}; response=${JSON.stringify(
-      data || {},
+      data || {}
     ).slice(0, 500)}`;
   }
 
@@ -1851,7 +1870,7 @@ export class MergeService {
 
   private async requestWithRetry<T>(
     requestFn: () => Promise<T>,
-    maxAttempts = 7,
+    maxAttempts = 7
   ): Promise<T> {
     let lastError: unknown;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -1895,7 +1914,7 @@ export class MergeService {
     const globalWait = Math.max(0, this.globalNextRequestAt - now);
     const accountWait = Math.max(
       0,
-      (this.accountNextRequestAt.get(accountId) || 0) - now,
+      (this.accountNextRequestAt.get(accountId) || 0) - now
     );
     const wait = Math.max(globalWait, accountWait);
     if (wait > 0) await this.sleep(wait);
