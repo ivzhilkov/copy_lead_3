@@ -15,6 +15,8 @@ const CHAT_EVENT_TYPES = [
 ] as const;
 
 type MergePermission = "all" | "leads" | "contacts" | "none";
+type MergeEntityType = "leads" | "contacts" | "companies";
+type StandaloneEntityType = MergeEntityType;
 
 type PublicProfilePayload = {
   userName?: string;
@@ -55,6 +57,21 @@ type FieldRow = {
     left: FieldValueView;
     right: FieldValueView;
   };
+};
+
+type EntityFieldValueView = {
+  entityId: number;
+  hasValue: boolean;
+  display: string;
+};
+
+type EntityFieldRow = {
+  key: string;
+  label: string;
+  type: "base" | "custom";
+  customFieldId?: number;
+  defaultEntityId: number | null;
+  values: EntityFieldValueView[];
 };
 
 @Injectable()
@@ -198,6 +215,16 @@ export class MergeService {
           .map((id) => Number(id))
           .filter((id) => Number.isFinite(id) && id > 0)
       : [];
+    const contactFieldSources = this.normalizeFieldSources(
+      body?.contact_field_sources
+    );
+    const selectedContactTagKeys = Array.isArray(
+      body?.selected_contact_tag_keys
+    )
+      ? body.selected_contact_tag_keys
+          .map((value) => String(value || ""))
+          .filter(Boolean)
+      : [];
     const profile = this.normalizeProfile(body?.profile);
     const api = this.createApi(account);
 
@@ -238,6 +265,8 @@ export class MergeService {
         api,
         pair.resultLeadId,
         selectedContactIds,
+        contactFieldSources,
+        selectedContactTagKeys,
         reason,
         profile,
         warnings
@@ -296,6 +325,302 @@ export class MergeService {
       deletedContactIds: contactMergeResult.deletedContactIds,
       pendingLeadDeleteIds,
       pendingContactDeleteIds: contactMergeResult.pendingContactDeleteIds,
+      warnings,
+      message: "Объединение выполнено.",
+    };
+  }
+
+  async searchEntities(
+    account: Account,
+    entityTypeRaw: unknown,
+    excludeIdsRaw: unknown,
+    query: string
+  ) {
+    const entityType = this.normalizeStandaloneEntityType(entityTypeRaw);
+    const excludeIds = new Set(
+      this.normalizeOptionalIds(excludeIdsRaw).filter((id) =>
+        Number.isFinite(id)
+      )
+    );
+    const normalizedQuery = String(query || "").trim();
+    if (normalizedQuery.length < 2) return { items: [] };
+
+    const api = this.createApi(account);
+    const results = new Map<number, any>();
+    const idFromQuery = this.extractEntityId(entityType, normalizedQuery);
+
+    if (idFromQuery && !excludeIds.has(idFromQuery)) {
+      try {
+        const entity = await this.getMergeEntity(api, entityType, idFromQuery);
+        if (entity?.id) {
+          results.set(
+            Number(entity.id),
+            this.toEntitySearchItem(entityType, entity)
+          );
+        }
+      } catch (e) {
+        const status = (e as AxiosError)?.response?.status;
+        if (status !== 404 && status !== 204) throw e;
+      }
+    }
+
+    if (!/^\d+$/.test(normalizedQuery) || normalizedQuery.length >= 3) {
+      const data = await this.requestWithRetry(() =>
+        api.get(`/api/v4/${entityType}`, {
+          params: {
+            query: normalizedQuery,
+            limit: 10,
+            with: "leads,customers,catalog_elements",
+          },
+        })
+      ).then(({ data }) => data);
+
+      const entities = data?._embedded?.[entityType] || [];
+      entities.forEach((entity) => {
+        const id = Number(entity?.id);
+        if (Number.isFinite(id) && !excludeIds.has(id)) {
+          results.set(id, this.toEntitySearchItem(entityType, entity));
+        }
+      });
+    }
+
+    return { items: Array.from(results.values()).slice(0, 10) };
+  }
+
+  async buildEntityPreview(
+    account: Account,
+    entityTypeRaw: unknown,
+    entityIdsRaw: unknown
+  ) {
+    const entityType = this.normalizeStandaloneEntityType(entityTypeRaw);
+    const entityIds = this.normalizeEntityIds(
+      entityIdsRaw,
+      "Выберите от 2 до 5 сущностей для объединения",
+      2,
+      5
+    );
+
+    const api = this.createApi(account);
+    const [entities, customFields, users, statuses] = await Promise.all([
+      Promise.all(
+        entityIds.map((id) => this.getMergeEntity(api, entityType, id))
+      ),
+      this.getCustomFieldsForEntity(api, entityType),
+      this.getUsersMap(api),
+      entityType === "leads"
+        ? this.getStatusesMap(api)
+        : Promise.resolve(new Map<string, string>()),
+    ]);
+
+    const safeEntities = entities.filter((entity) =>
+      Number.isFinite(Number(entity?.id))
+    );
+    if (safeEntities.length < 2) {
+      throw new BadRequestException("Не удалось загрузить выбранные карточки");
+    }
+
+    const resultEntityId = this.getOldestEntityId(safeEntities);
+    const deletedEntityIds = safeEntities
+      .map((entity) => Number(entity.id))
+      .filter((id) => id !== resultEntityId);
+    const fields = this.buildEntityFieldRows(
+      entityType,
+      safeEntities,
+      customFields,
+      users,
+      statuses
+    );
+    const tags = this.buildGenericTagsPreview(safeEntities);
+    const linkedLeads =
+      entityType === "leads"
+        ? []
+        : await this.buildLinkedLeadsPreview(api, entityType, safeEntities);
+
+    return {
+      entityType,
+      entityLabel: this.getEntityTypePluralName(entityType),
+      entities: safeEntities.map((entity) =>
+        this.toPreviewEntity(entityType, entity, users)
+      ),
+      olderEntityId: resultEntityId,
+      resultEntityId,
+      deletedEntityIds,
+      fields,
+      tags,
+      linkedLeads,
+    };
+  }
+
+  async executeEntityMerge(account: Account, body: any) {
+    const entityType = this.normalizeStandaloneEntityType(body?.entity_type);
+    const entityIds = this.normalizeEntityIds(
+      body?.entity_ids,
+      "Выберите от 2 до 5 сущностей для объединения",
+      2,
+      5
+    );
+    const reason = String(body?.reason || "").trim();
+    if (reason.length < 4) {
+      throw new BadRequestException(
+        "Укажите причину объединения, минимум 4 символа"
+      );
+    }
+
+    const permission = this.normalizePermission(body?.permission);
+    const canMergeEntity =
+      entityType === "leads"
+        ? permission === "all" || permission === "leads"
+        : permission === "all" || permission === "contacts";
+    if (!canMergeEntity) {
+      throw new BadRequestException(
+        "У пользователя нет прав на это объединение"
+      );
+    }
+
+    const fieldSources = this.normalizeFieldSources(body?.field_sources);
+    const selectedTagKeys = Array.isArray(body?.selected_tag_keys)
+      ? body.selected_tag_keys
+          .map((value) => String(value || ""))
+          .filter(Boolean)
+      : [];
+    const selectedLinkedLeadIds = this.normalizeOptionalIds(
+      body?.selected_linked_lead_ids
+    );
+    const profile = this.normalizeProfile(body?.profile);
+    const api = this.createApi(account);
+
+    const [entities, customFields, users] = await Promise.all([
+      Promise.all(
+        entityIds.map((id) => this.getMergeEntity(api, entityType, id))
+      ),
+      this.getCustomFieldsForEntity(api, entityType),
+      this.getUsersMap(api),
+    ]);
+    const safeEntities = entities.filter((entity) =>
+      Number.isFinite(Number(entity?.id))
+    );
+    if (safeEntities.length < 2) {
+      throw new BadRequestException("Не удалось загрузить выбранные карточки");
+    }
+
+    const resultEntityId = this.getOldestEntityId(safeEntities);
+    const deletedEntityIds: number[] = [];
+    const pendingEntityDeleteIds: number[] = [];
+    const warnings: string[] = [];
+    const patch = this.buildEntityMergePatch(
+      entityType,
+      safeEntities,
+      customFields,
+      fieldSources,
+      selectedTagKeys
+    );
+
+    if (Object.keys(patch).length) {
+      await this.requestWithRetry(() =>
+        api.patch(`/api/v4/${entityType}/${resultEntityId}`, patch)
+      );
+    }
+
+    if (entityType !== "leads") {
+      await this.syncEntityLeadLinks(
+        api,
+        entityType,
+        resultEntityId,
+        selectedLinkedLeadIds,
+        warnings
+      );
+    }
+
+    for (const duplicate of safeEntities) {
+      const duplicateId = Number(duplicate.id);
+      if (duplicateId === resultEntityId) continue;
+      if (entityType === "leads") {
+        await this.linkEntitiesFromLeadId(
+          api,
+          duplicateId,
+          resultEntityId,
+          warnings
+        );
+        await this.copyLeadNotes(api, duplicateId, resultEntityId, warnings);
+        await this.copyLeadTasks(api, duplicateId, resultEntityId, warnings);
+      } else if (entityType === "contacts") {
+        await this.moveContactChats(api, duplicateId, resultEntityId, warnings);
+        await this.copyEntityNotes(
+          api,
+          entityType,
+          duplicateId,
+          resultEntityId,
+          warnings
+        );
+      } else {
+        await this.copyEntityNotes(
+          api,
+          entityType,
+          duplicateId,
+          resultEntityId,
+          warnings
+        );
+      }
+      const deleted = await this.deleteEntityOrWarn(
+        api,
+        entityType,
+        duplicateId,
+        warnings
+      );
+      if (deleted) deletedEntityIds.push(duplicateId);
+      else pendingEntityDeleteIds.push(duplicateId);
+    }
+
+    await this.createEntityMergeSystemNote(
+      api,
+      account,
+      entityType,
+      safeEntities.map((entity) => Number(entity.id)),
+      resultEntityId,
+      selectedLinkedLeadIds,
+      reason,
+      profile
+    );
+
+    await this.historyRepo.save({
+      accountId: account.amoId,
+      widgetCode: account.widgetCode,
+      primaryLeadId: entityIds[0],
+      secondaryLeadId: entityIds[1],
+      resultLeadId: resultEntityId,
+      deletedLeadId: deletedEntityIds[0] || null,
+      contactIds:
+        entityType === "contacts"
+          ? safeEntities.map((entity) => Number(entity.id))
+          : [],
+      userName: profile.userName,
+      userId: profile.userId,
+      reason,
+      permission,
+      details: {
+        entityType,
+        entityIds,
+        fieldSources,
+        selectedTagKeys,
+        selectedLinkedLeadIds,
+        deletedEntityIds,
+        pendingEntityDeleteIds,
+        warnings,
+      },
+    });
+
+    return {
+      ok: true,
+      entityType,
+      resultEntityId,
+      deletedEntityIds,
+      pendingEntityDeleteIds,
+      pendingLeadDeleteIds:
+        entityType === "leads" ? pendingEntityDeleteIds : [],
+      pendingContactDeleteIds:
+        entityType === "contacts" ? pendingEntityDeleteIds : [],
+      pendingCompanyDeleteIds:
+        entityType === "companies" ? pendingEntityDeleteIds : [],
       warnings,
       message: "Объединение выполнено.",
     };
@@ -462,6 +787,8 @@ export class MergeService {
     api: AxiosInstance,
     resultLeadId: number,
     selectedContactIds: number[],
+    fieldSources: Record<string, number>,
+    selectedTagKeys: string[],
     reason: string,
     profile: PublicProfilePayload,
     warnings: string[]
@@ -491,7 +818,17 @@ export class MergeService {
       (contact) => Number(contact.id) !== survivorId
     );
 
-    const patch = this.buildContactPatch(survivor, duplicateContacts);
+    const customFields = await this.getCustomFieldsForEntity(api, "contacts");
+    const patch =
+      Object.keys(fieldSources || {}).length || selectedTagKeys.length
+        ? this.buildEntityMergePatch(
+            "contacts",
+            safeContacts,
+            customFields,
+            fieldSources,
+            selectedTagKeys
+          )
+        : this.buildContactPatch(survivor, duplicateContacts);
     if (Object.keys(patch).length) {
       await this.requestWithRetry(() =>
         api.patch(`/api/v4/contacts/${survivorId}`, patch)
@@ -552,6 +889,252 @@ export class MergeService {
     return patch;
   }
 
+  private buildEntityMergePatch(
+    entityType: MergeEntityType,
+    entities: any[],
+    customFields: Map<number, any>,
+    fieldSources: Record<string, number>,
+    selectedTagKeys: string[]
+  ) {
+    const byId = new Map<number, any>(
+      entities.map((entity) => [Number(entity.id), entity])
+    );
+    const patch: any = {};
+    const customFieldsPatch: any[] = [];
+
+    Object.entries(fieldSources || {}).forEach(([key, sourceEntityId]) => {
+      const source = byId.get(Number(sourceEntityId));
+      if (!source) return;
+
+      if (key === "name" && this.hasValue(source.name)) {
+        patch.name = source.name;
+        return;
+      }
+      if (
+        entityType === "contacts" &&
+        key === "first_name" &&
+        this.hasValue(source.first_name)
+      ) {
+        patch.first_name = source.first_name;
+        return;
+      }
+      if (
+        entityType === "contacts" &&
+        key === "last_name" &&
+        this.hasValue(source.last_name)
+      ) {
+        patch.last_name = source.last_name;
+        return;
+      }
+      if (
+        key === "responsible_user_id" &&
+        Number.isFinite(Number(source.responsible_user_id))
+      ) {
+        patch.responsible_user_id = Number(source.responsible_user_id);
+        return;
+      }
+      if (
+        entityType === "leads" &&
+        key === "created_at" &&
+        Number.isFinite(Number(source.created_at))
+      ) {
+        patch.created_at = Number(source.created_at);
+        return;
+      }
+      if (
+        entityType === "leads" &&
+        key === "price" &&
+        Number.isFinite(Number(source.price))
+      ) {
+        patch.price = Number(source.price);
+        return;
+      }
+      if (entityType === "leads" && key === "status") {
+        if (Number.isFinite(Number(source.pipeline_id))) {
+          patch.pipeline_id = Number(source.pipeline_id);
+        }
+        if (Number.isFinite(Number(source.status_id))) {
+          patch.status_id = Number(source.status_id);
+        }
+        return;
+      }
+      if (
+        entityType === "leads" &&
+        key === "source_id" &&
+        Number.isFinite(Number(source.source_id))
+      ) {
+        patch.source_id = Number(source.source_id);
+        return;
+      }
+      if (key.startsWith("cf_")) {
+        const fieldId = Number(key.replace(/^cf_/, ""));
+        const sourceField = this.findCustomField(source, fieldId);
+        if (!sourceField) return;
+        customFieldsPatch.push({
+          field_id: fieldId,
+          values: this.mapCustomFieldValues(sourceField.values || []),
+        });
+      }
+    });
+
+    if (customFieldsPatch.length) {
+      patch.custom_fields_values = customFieldsPatch.filter((field) => {
+        const schema = customFields.get(Number(field.field_id));
+        return schema || Number.isFinite(Number(field.field_id));
+      });
+    }
+
+    const selectedTags = this.buildGenericTagsPreview(entities).filter((tag) =>
+      selectedTagKeys.includes(tag.key)
+    );
+    if (selectedTags.length) {
+      patch.tags_to_add = selectedTags.map((tag) =>
+        Number.isFinite(Number(tag.id)) && Number(tag.id) > 0
+          ? { id: Number(tag.id) }
+          : { name: tag.name }
+      );
+    }
+
+    return patch;
+  }
+
+  private async syncEntityLeadLinks(
+    api: AxiosInstance,
+    entityType: StandaloneEntityType,
+    resultEntityId: number,
+    selectedLeadIds: number[],
+    warnings: string[]
+  ) {
+    const selected = new Set(
+      (selectedLeadIds || []).filter((id) => Number.isFinite(id) && id > 0)
+    );
+    const links = await this.getEntityLinks(api, entityType, resultEntityId);
+    const currentLeadIds = new Set(
+      links
+        .filter((link) => link?.to_entity_type === "leads")
+        .map((link) => Number(link?.to_entity_id))
+        .filter((id) => Number.isFinite(id) && id > 0)
+    );
+
+    const toAttach = Array.from(selected)
+      .filter((leadId) => !currentLeadIds.has(leadId))
+      .map((leadId) => ({
+        to_entity_id: leadId,
+        to_entity_type: "leads",
+      }));
+    for (const chunk of this.chunk(toAttach, 50)) {
+      if (!chunk.length) continue;
+      try {
+        await this.requestWithRetry(() =>
+          api.post(`/api/v4/${entityType}/${resultEntityId}/link`, chunk)
+        );
+      } catch (e) {
+        warnings.push(
+          `не удалось привязать часть сделок к ${this.getEntitySingularName(
+            entityType
+          )} #${resultEntityId}: ${this.formatAmoError(e)}`
+        );
+      }
+    }
+
+    const toDetach = Array.from(currentLeadIds)
+      .filter((leadId) => !selected.has(leadId))
+      .map((leadId) => ({
+        to_entity_id: leadId,
+        to_entity_type: "leads",
+      }));
+    for (const chunk of this.chunk(toDetach, 50)) {
+      if (!chunk.length) continue;
+      try {
+        await this.requestWithRetry(() =>
+          api.post(`/api/v4/${entityType}/${resultEntityId}/unlink`, chunk)
+        );
+      } catch (e) {
+        warnings.push(
+          `не удалось отвязать часть сделок от ${this.getEntitySingularName(
+            entityType
+          )} #${resultEntityId}: ${this.formatAmoError(e)}`
+        );
+      }
+    }
+  }
+
+  private async copyEntityNotes(
+    api: AxiosInstance,
+    entityType: StandaloneEntityType,
+    sourceEntityId: number,
+    targetEntityId: number,
+    warnings: string[]
+  ) {
+    try {
+      const notes = await this.getAllEntityNotes(
+        api,
+        entityType,
+        sourceEntityId
+      );
+      const serviceName =
+        entityType === "contacts"
+          ? "Объединение контактов"
+          : "Объединение компаний";
+      const bodies = notes
+        .filter((note) => EDITABLE_NOTE_TYPES.has(note.note_type))
+        .map((note) => this.buildCopiedNoteBody(note, serviceName));
+      await this.postCopiedNotes(api, entityType, targetEntityId, bodies);
+    } catch (e) {
+      warnings.push(
+        `не удалось перенести примечания ${this.getEntityGenitiveName(
+          entityType
+        )} #${sourceEntityId}: ${this.formatAmoError(e)}`
+      );
+    }
+  }
+
+  private async createEntityMergeSystemNote(
+    api: AxiosInstance,
+    account: Account,
+    entityType: StandaloneEntityType,
+    entityIds: number[],
+    resultEntityId: number,
+    selectedLeadIds: number[],
+    reason: string,
+    profile: PublicProfilePayload
+  ) {
+    const user = this.formatProfileName(profile);
+    const dateText = this.formatTimestamp(Math.floor(Date.now() / 1000));
+    const resultUrl = this.getEntityUrl(
+      account.url,
+      entityType,
+      resultEntityId
+    );
+    const linkedText =
+      entityType === "leads"
+        ? null
+        : selectedLeadIds.length
+        ? `Оставлены сделки: ${selectedLeadIds
+            .map((id) => `#${id}`)
+            .join(", ")}.`
+        : "Связанные сделки не оставлены.";
+    const text = [
+      `Объединил: ${user}.`,
+      `Когда: ${dateText}.`,
+      `${this.getEntityTypePluralName(entityType)} ${entityIds
+        .map((id) => `#${id}`)
+        .join(", ")} объединены в #${resultEntityId}.`,
+      `Итоговая карточка: ${resultUrl}.`,
+      linkedText,
+      `Причина: ${reason}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+
+    await this.safeCreateEntitySystemNote(
+      api,
+      entityType,
+      resultEntityId,
+      text
+    );
+  }
+
   private mergeCustomFieldsForPatch(entities: any[]) {
     const byField = new Map<number, any>();
     entities.forEach((entity, entityIndex) => {
@@ -610,7 +1193,21 @@ export class MergeService {
     pair: LeadPair,
     warnings: string[]
   ) {
-    const links = await this.getEntityLinks(api, "leads", pair.deletedLeadId);
+    await this.linkEntitiesFromLeadId(
+      api,
+      pair.deletedLeadId,
+      pair.resultLeadId,
+      warnings
+    );
+  }
+
+  private async linkEntitiesFromLeadId(
+    api: AxiosInstance,
+    sourceLeadId: number,
+    targetLeadId: number,
+    warnings: string[]
+  ) {
+    const links = await this.getEntityLinks(api, "leads", sourceLeadId);
     const payload = links
       .filter((link) => Number(link?.to_entity_id) > 0 && link?.to_entity_type)
       .map((link) => {
@@ -627,13 +1224,13 @@ export class MergeService {
       if (!chunk.length) continue;
       try {
         await this.requestWithRetry(() =>
-          api.post(`/api/v4/leads/${pair.resultLeadId}/link`, chunk)
+          api.post(`/api/v4/leads/${targetLeadId}/link`, chunk)
         );
       } catch (e) {
         warnings.push(
-          `не удалось перенести часть связей сделки #${
-            pair.deletedLeadId
-          }: ${this.formatAmoError(e)}`
+          `не удалось перенести часть связей сделки #${sourceLeadId}: ${this.formatAmoError(
+            e
+          )}`
         );
       }
     }
@@ -902,7 +1499,7 @@ export class MergeService {
 
   private async deleteEntityOrWarn(
     api: AxiosInstance,
-    entityType: "leads" | "contacts",
+    entityType: MergeEntityType,
     entityId: number,
     warnings: string[]
   ) {
@@ -910,17 +1507,17 @@ export class MergeService {
       const deleted = await this.deleteEntity(api, entityType, entityId);
       if (!deleted) {
         warnings.push(
-          `${
-            entityType === "leads" ? "сделка" : "контакт"
-          } #${entityId} не удалён: amoCRM оставила карточку активной`
+          `${this.getEntitySingularName(
+            entityType
+          )} #${entityId} не удалён: amoCRM оставила карточку активной`
         );
       }
       return deleted;
     } catch (e) {
       warnings.push(
-        `не удалось удалить ${
-          entityType === "leads" ? "сделку" : "контакт"
-        } #${entityId}: ${this.formatAmoError(e)}`
+        `не удалось удалить ${this.getEntityAccusativeName(
+          entityType
+        )} #${entityId}: ${this.formatAmoError(e)}`
       );
       return false;
     }
@@ -928,7 +1525,7 @@ export class MergeService {
 
   private async deleteEntity(
     api: AxiosInstance,
-    entityType: "leads" | "contacts",
+    entityType: MergeEntityType,
     entityId: number
   ) {
     const attempts: Array<() => Promise<void>> = [
@@ -985,7 +1582,7 @@ export class MergeService {
 
   private async deleteEntityViaAjax(
     api: AxiosInstance,
-    entityType: "leads" | "contacts",
+    entityType: MergeEntityType,
     entityId: number
   ) {
     const body = new URLSearchParams();
@@ -1004,7 +1601,7 @@ export class MergeService {
 
   private async isEntityDeleted(
     api: AxiosInstance,
-    entityType: "leads" | "contacts",
+    entityType: MergeEntityType,
     entityId: number
   ) {
     try {
@@ -1079,6 +1676,39 @@ export class MergeService {
     } catch (e) {
       this.logger.warn(
         `Не удалось создать системное примечание для контакта ${contactId}: ${this.formatAmoError(
+          e
+        )}`
+      );
+    }
+  }
+
+  private async safeCreateEntitySystemNote(
+    api: AxiosInstance,
+    entityType: MergeEntityType,
+    entityId: number,
+    text: string
+  ) {
+    try {
+      const service =
+        entityType === "leads"
+          ? "Объединение сделок"
+          : entityType === "contacts"
+          ? "Объединение контактов"
+          : "Объединение компаний";
+      await this.requestWithRetry(() =>
+        api.post(`/api/v4/${entityType}/${entityId}/notes`, [
+          {
+            note_type: "service_message",
+            params: {
+              service,
+              text,
+            },
+          },
+        ])
+      );
+    } catch (e) {
+      this.logger.warn(
+        `Не удалось создать системное примечание для ${entityType} ${entityId}: ${this.formatAmoError(
           e
         )}`
       );
@@ -1340,6 +1970,264 @@ export class MergeService {
       }));
   }
 
+  private buildEntityFieldRows(
+    entityType: StandaloneEntityType,
+    entities: any[],
+    customFields: Map<number, any>,
+    users: Map<number, string>,
+    statuses: Map<string, string> = new Map()
+  ): EntityFieldRow[] {
+    const baseRows: Array<{
+      key: string;
+      label: string;
+      getDisplay: (entity: any) => string;
+      hasValue?: (entity: any) => boolean;
+    }> = [
+      {
+        key: "name",
+        label: "Имя",
+        getDisplay: (entity) => String(entity?.name || ""),
+      },
+      ...(entityType === "contacts"
+        ? [
+            {
+              key: "first_name",
+              label: "Имя контакта",
+              getDisplay: (entity: any) => String(entity?.first_name || ""),
+            },
+            {
+              key: "last_name",
+              label: "Фамилия контакта",
+              getDisplay: (entity: any) => String(entity?.last_name || ""),
+            },
+          ]
+        : []),
+      {
+        key: "responsible_user_id",
+        label: "Отв-ный",
+        getDisplay: (entity) =>
+          users.get(Number(entity?.responsible_user_id)) ||
+          (entity?.responsible_user_id
+            ? `ID ${entity.responsible_user_id}`
+            : ""),
+      },
+      ...(entityType === "leads"
+        ? [
+            {
+              key: "created_at",
+              label: "Дата создания",
+              getDisplay: (entity: any) =>
+                this.formatTimestamp(entity?.created_at),
+            },
+            {
+              key: "price",
+              label: "Бюджет",
+              getDisplay: (entity: any) => this.formatMoney(entity?.price),
+              hasValue: (entity: any) => Number.isFinite(Number(entity?.price)),
+            },
+            {
+              key: "status",
+              label: "Статус",
+              getDisplay: (entity: any) =>
+                statuses.get(`${entity?.pipeline_id}_${entity?.status_id}`) ||
+                [entity?.pipeline_id, entity?.status_id]
+                  .filter(Boolean)
+                  .join(" / "),
+            },
+            {
+              key: "source_id",
+              label: "Источник",
+              getDisplay: (entity: any) =>
+                entity?.source_id ? `ID ${entity.source_id}` : "",
+            },
+          ]
+        : []),
+    ];
+
+    const rows = baseRows.map((row) =>
+      this.toEntityFieldRow(
+        entities,
+        row.key,
+        row.label,
+        "base",
+        row.getDisplay,
+        row.hasValue
+      )
+    );
+
+    const customFieldIds = new Set<number>();
+    entities.forEach((entity) => {
+      (entity?.custom_fields_values || []).forEach((field) => {
+        const id = Number(field?.field_id);
+        if (Number.isFinite(id)) customFieldIds.add(id);
+      });
+    });
+
+    Array.from(customFieldIds)
+      .sort((a, b) => {
+        const leftName = String(customFields.get(a)?.name || a);
+        const rightName = String(customFields.get(b)?.name || b);
+        return leftName.localeCompare(rightName, "ru");
+      })
+      .forEach((fieldId) => {
+        const schema = customFields.get(fieldId);
+        rows.push(
+          this.toEntityFieldRow(
+            entities,
+            `cf_${fieldId}`,
+            schema?.name || `Поле #${fieldId}`,
+            "custom",
+            (entity) =>
+              this.formatCustomField(
+                this.findCustomField(entity, fieldId),
+                schema
+              ),
+            (entity) => Boolean(this.findCustomField(entity, fieldId)),
+            fieldId
+          )
+        );
+      });
+
+    return rows.filter((row) => row.values.some((value) => value.hasValue));
+  }
+
+  private toEntityFieldRow(
+    entities: any[],
+    key: string,
+    label: string,
+    type: "base" | "custom",
+    getDisplay: (entity: any) => string,
+    hasValueFn?: (entity: any) => boolean,
+    customFieldId?: number
+  ): EntityFieldRow {
+    const values = entities.map((entity) => {
+      const display = getDisplay(entity);
+      return {
+        entityId: Number(entity.id),
+        hasValue: hasValueFn ? hasValueFn(entity) : this.hasValue(display),
+        display,
+      };
+    });
+    const olderEntityId = this.getOldestEntityId(entities);
+    const olderValue = values.find((value) => value.entityId === olderEntityId);
+    const fallbackValue = values.find((value) => value.hasValue);
+
+    return {
+      key,
+      label,
+      type,
+      customFieldId,
+      defaultEntityId: olderValue?.hasValue
+        ? olderValue.entityId
+        : fallbackValue?.entityId || null,
+      values,
+    };
+  }
+
+  private buildGenericTagsPreview(entities: any[]) {
+    const tags = new Map<string, any>();
+    entities.forEach((entity) => {
+      const entityId = Number(entity?.id);
+      (entity?._embedded?.tags || []).forEach((tag) => {
+        const key =
+          Number.isFinite(Number(tag?.id)) && Number(tag.id) > 0
+            ? `id:${tag.id}`
+            : `name:${String(tag?.name || "")
+                .trim()
+                .toLowerCase()}`;
+        if (!key || key === "name:") return;
+        if (!tags.has(key)) {
+          tags.set(key, {
+            key,
+            id: Number.isFinite(Number(tag?.id)) ? Number(tag.id) : null,
+            name: String(tag?.name || `Тег #${tag?.id}`).trim(),
+            entityIds: [],
+          });
+        }
+        const saved = tags.get(key);
+        if (!saved.entityIds.includes(entityId)) saved.entityIds.push(entityId);
+      });
+    });
+    return Array.from(tags.values()).sort((a, b) =>
+      a.name.localeCompare(b.name, "ru")
+    );
+  }
+
+  private async buildLinkedLeadsPreview(
+    api: AxiosInstance,
+    entityType: StandaloneEntityType,
+    entities: any[]
+  ) {
+    const leadIds = Array.from(
+      new Set(
+        entities.flatMap((entity) =>
+          (entity?._embedded?.leads || [])
+            .map((lead) => Number(lead?.id))
+            .filter((id) => Number.isFinite(id) && id > 0)
+        )
+      )
+    );
+
+    const leads = await Promise.all(
+      leadIds.map(async (leadId) => {
+        try {
+          return await this.getLead(api, leadId);
+        } catch (e) {
+          return { id: leadId, name: `Сделка #${leadId}` };
+        }
+      })
+    );
+
+    return leads
+      .sort((a, b) => Number(a?.id || 0) - Number(b?.id || 0))
+      .map((lead) => ({
+        id: Number(lead.id),
+        name: lead.name || `Сделка #${lead.id}`,
+        createdAt: lead.created_at || null,
+        createdAtText: this.formatTimestamp(lead.created_at),
+        price: Number(lead.price || 0),
+        defaultSelected: true,
+        entityType,
+      }));
+  }
+
+  private getOldestEntityId(entities: any[]) {
+    const sorted = [...entities].sort((left, right) => {
+      const leftCreatedAt = Number(left?.created_at || 0);
+      const rightCreatedAt = Number(right?.created_at || 0);
+      if (leftCreatedAt && rightCreatedAt && leftCreatedAt !== rightCreatedAt) {
+        return leftCreatedAt - rightCreatedAt;
+      }
+      return Number(left?.id || 0) - Number(right?.id || 0);
+    });
+    return Number(sorted[0]?.id);
+  }
+
+  private toPreviewEntity(
+    entityType: StandaloneEntityType,
+    entity: any,
+    users: Map<number, string>
+  ) {
+    return {
+      id: Number(entity.id),
+      entityType,
+      name:
+        entity.name ||
+        [entity.first_name, entity.last_name].filter(Boolean).join(" ") ||
+        `${this.getEntitySingularName(entityType)} #${entity.id}`,
+      createdAt: entity.created_at || null,
+      createdAtText: this.formatTimestamp(entity.created_at),
+      responsibleUserId: entity.responsible_user_id,
+      responsibleName:
+        users.get(Number(entity.responsible_user_id)) ||
+        (entity.responsible_user_id ? `ID ${entity.responsible_user_id}` : ""),
+      summary:
+        entityType === "contacts"
+          ? this.contactSummary(entity)
+          : this.companySummary(entity),
+    };
+  }
+
   private contactSummary(contact: any) {
     const values = (contact?.custom_fields_values || [])
       .flatMap((field) =>
@@ -1350,6 +2238,15 @@ export class MergeService {
       values.slice(0, 3).join(", ") ||
       "нет телефонов или email в доступных полях"
     );
+  }
+
+  private companySummary(company: any) {
+    const values = (company?.custom_fields_values || [])
+      .flatMap((field) =>
+        (field?.values || []).map((value) => String(value?.value || "").trim())
+      )
+      .filter(Boolean);
+    return values.slice(0, 3).join(", ") || "нет заполненных полей";
   }
 
   private async getLead(api: AxiosInstance, leadId: number) {
@@ -1368,9 +2265,34 @@ export class MergeService {
     ).then(({ data }) => data);
   }
 
+  private async getCompany(api: AxiosInstance, companyId: number) {
+    return this.requestWithRetry(() =>
+      api.get(`/api/v4/companies/${companyId}`, {
+        params: { with: "leads,customers,catalog_elements" },
+      })
+    ).then(({ data }) => data);
+  }
+
+  private async getMergeEntity(
+    api: AxiosInstance,
+    entityType: MergeEntityType,
+    entityId: number
+  ) {
+    if (entityType === "leads") return this.getLead(api, entityId);
+    if (entityType === "contacts") return this.getContact(api, entityId);
+    return this.getCompany(api, entityId);
+  }
+
   private async getCustomFields(api: AxiosInstance) {
+    return this.getCustomFieldsForEntity(api, "leads");
+  }
+
+  private async getCustomFieldsForEntity(
+    api: AxiosInstance,
+    entityType: MergeEntityType
+  ) {
     const data = await this.requestWithRetry(() =>
-      api.get("/api/v4/leads/custom_fields", { params: { limit: 250 } })
+      api.get(`/api/v4/${entityType}/custom_fields`, { params: { limit: 250 } })
     ).then(({ data }) => data);
     const map = new Map<number, any>();
     (data?._embedded?.custom_fields || []).forEach((field) => {
@@ -1432,7 +2354,7 @@ export class MergeService {
 
   private async getEntityLinks(
     api: AxiosInstance,
-    entityType: "leads" | "contacts",
+    entityType: MergeEntityType,
     entityId: number
   ) {
     const links: any[] = [];
@@ -1478,7 +2400,7 @@ export class MergeService {
 
   private async getAllEntityNotes(
     api: AxiosInstance,
-    entityType: "leads" | "contacts",
+    entityType: MergeEntityType,
     entityId: number
   ) {
     const notes: any[] = [];
@@ -1516,7 +2438,7 @@ export class MergeService {
 
   private async postCopiedNotes(
     api: AxiosInstance,
-    entityType: "leads" | "contacts",
+    entityType: MergeEntityType,
     entityId: number,
     noteBodies: any[]
   ) {
@@ -1620,6 +2542,62 @@ export class MergeService {
     return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
   }
 
+  private extractEntityId(entityType: MergeEntityType, value: string) {
+    const path =
+      entityType === "leads"
+        ? "leads"
+        : entityType === "contacts"
+        ? "contacts"
+        : "companies";
+    const fromUrl = String(value || "").match(
+      new RegExp(`/${path}/detail/(\\d+)`)
+    )?.[1];
+    const fromDigits = String(value || "").match(/^\s*(\d+)\s*$/)?.[1];
+    const parsed = Number(fromUrl || fromDigits || 0);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+  }
+
+  private normalizeStandaloneEntityType(value: unknown): StandaloneEntityType {
+    const normalized = String(value || "").toLowerCase();
+    if (normalized === "leads" || normalized === "lead") return "leads";
+    if (normalized === "contacts" || normalized === "contact")
+      return "contacts";
+    if (normalized === "companies" || normalized === "company")
+      return "companies";
+    throw new BadRequestException("Некорректный тип сущности");
+  }
+
+  private normalizeOptionalIds(value: unknown) {
+    const values = Array.isArray(value)
+      ? value
+      : typeof value === "string" && value.includes(",")
+      ? value.split(",")
+      : value === null || value === undefined || value === ""
+      ? []
+      : [value];
+    return Array.from(
+      new Set(
+        values
+          .map((item) => Number(item))
+          .filter((id) => Number.isFinite(id) && id > 0)
+          .map((id) => Math.floor(id))
+      )
+    );
+  }
+
+  private normalizeEntityIds(
+    value: unknown,
+    message: string,
+    minCount: number,
+    maxCount: number
+  ) {
+    const ids = this.normalizeOptionalIds(value);
+    if (ids.length < minCount || ids.length > maxCount) {
+      throw new BadRequestException(message);
+    }
+    return ids;
+  }
+
   private normalizePermission(value: unknown): MergePermission {
     if (value === "leads") return "leads";
     if (value === "contacts") return "contacts";
@@ -1680,6 +2658,24 @@ export class MergeService {
       price: Number(lead.price || 0),
       createdAt: lead.created_at || null,
       responsibleUserId: lead.responsible_user_id || null,
+    };
+  }
+
+  private toEntitySearchItem(entityType: StandaloneEntityType, entity: any) {
+    return {
+      id: Number(entity.id),
+      entityType,
+      name:
+        entity.name ||
+        [entity.first_name, entity.last_name].filter(Boolean).join(" ") ||
+        `${this.getEntitySingularName(entityType)} #${entity.id}`,
+      createdAt: entity.created_at || null,
+      createdAtText: this.formatTimestamp(entity.created_at),
+      responsibleUserId: entity.responsible_user_id || null,
+      summary:
+        entityType === "contacts"
+          ? this.contactSummary(entity)
+          : this.companySummary(entity),
     };
   }
 
@@ -1847,6 +2843,39 @@ export class MergeService {
   private getLeadUrl(accountUrl: string, leadId: number) {
     const base = String(accountUrl || "").replace(/\/$/, "");
     return `${base}/leads/detail/${leadId}`;
+  }
+
+  private getEntityUrl(
+    accountUrl: string,
+    entityType: MergeEntityType,
+    entityId: number
+  ) {
+    const base = String(accountUrl || "").replace(/\/$/, "");
+    return `${base}/${entityType}/detail/${entityId}`;
+  }
+
+  private getEntitySingularName(entityType: MergeEntityType) {
+    if (entityType === "leads") return "сделка";
+    if (entityType === "contacts") return "контакт";
+    return "компания";
+  }
+
+  private getEntityAccusativeName(entityType: MergeEntityType) {
+    if (entityType === "leads") return "сделку";
+    if (entityType === "contacts") return "контакт";
+    return "компанию";
+  }
+
+  private getEntityGenitiveName(entityType: MergeEntityType) {
+    if (entityType === "leads") return "сделки";
+    if (entityType === "contacts") return "контакта";
+    return "компании";
+  }
+
+  private getEntityTypePluralName(entityType: MergeEntityType) {
+    if (entityType === "leads") return "Сделки";
+    if (entityType === "contacts") return "Контакты";
+    return "Компании";
   }
 
   private formatAmoError(error: unknown) {

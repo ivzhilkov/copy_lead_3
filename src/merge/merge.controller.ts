@@ -64,6 +64,24 @@ export class MergeController {
     );
   }
 
+  @Get("/public/entities/search")
+  async searchEntityPublic(
+    @Query("account_id") accountIdRaw: string | number,
+    @Query("widget_code") widgetCode: string,
+    @Query("entity_type") entityType: string,
+    @Query("exclude_id") excludeIdRaw: string | number | string[] | number[],
+    @Query("exclude_ids") excludeIdsRaw: string | number | string[] | number[],
+    @Query("q") query: string
+  ) {
+    const account = await this.resolvePublicAccount(accountIdRaw, widgetCode);
+    return this.mergeService.searchEntities(
+      account,
+      entityType,
+      excludeIdsRaw || excludeIdRaw,
+      query
+    );
+  }
+
   @Post("/public/preview")
   async previewPublic(
     @Body("account_id") accountIdRaw: string | number,
@@ -87,6 +105,30 @@ export class MergeController {
   ) {
     const account = await this.resolvePublicAccount(accountIdRaw, widgetCode);
     return this.mergeService.execute(account, body);
+  }
+
+  @Post("/public/entities/preview")
+  async previewEntityPublic(
+    @Body("account_id") accountIdRaw: string | number,
+    @Body("widget_code") widgetCode: string,
+    @Body() body: any
+  ) {
+    const account = await this.resolvePublicAccount(accountIdRaw, widgetCode);
+    return this.mergeService.buildEntityPreview(
+      account,
+      body?.entity_type,
+      body?.entity_ids
+    );
+  }
+
+  @Post("/public/entities/execute")
+  async executeEntityPublic(
+    @Body("account_id") accountIdRaw: string | number,
+    @Body("widget_code") widgetCode: string,
+    @Body() body: any
+  ) {
+    const account = await this.resolvePublicAccount(accountIdRaw, widgetCode);
+    return this.mergeService.executeEntityMerge(account, body);
   }
 
   @Get("/public/history")
