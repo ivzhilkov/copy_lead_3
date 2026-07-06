@@ -63,12 +63,20 @@ type EntityFieldValueView = {
   entityId: number;
   hasValue: boolean;
   display: string;
+  items?: EntityFieldValueItem[];
+};
+
+type EntityFieldValueItem = {
+  key: string;
+  entityId: number;
+  display: string;
 };
 
 type EntityFieldRow = {
   key: string;
   label: string;
   type: "base" | "custom";
+  mode?: "single" | "multiple";
   customFieldId?: number;
   defaultEntityId: number | null;
   values: EntityFieldValueView[];
@@ -205,6 +213,9 @@ export class MergeService {
     const canMergeContacts = permission === "all" || permission === "contacts";
     const mergeContacts = Boolean(body?.merge_contacts) && canMergeContacts;
     const fieldSources = this.normalizeFieldSources(body?.field_sources);
+    const selectedMultiValueKeys = this.normalizeStringList(
+      body?.selected_multi_value_keys
+    );
     const selectedTagKeys = Array.isArray(body?.selected_tag_keys)
       ? body.selected_tag_keys
           .map((value) => String(value || ""))
@@ -225,6 +236,9 @@ export class MergeService {
           .map((value) => String(value || ""))
           .filter(Boolean)
       : [];
+    const selectedContactMultiValueKeys = this.normalizeStringList(
+      body?.selected_contact_multi_value_keys
+    );
     const profile = this.normalizeProfile(body?.profile);
     const api = this.createApi(account);
 
@@ -267,6 +281,7 @@ export class MergeService {
         selectedContactIds,
         contactFieldSources,
         selectedContactTagKeys,
+        selectedContactMultiValueKeys,
         reason,
         profile,
         warnings
@@ -478,6 +493,9 @@ export class MergeService {
     }
 
     const fieldSources = this.normalizeFieldSources(body?.field_sources);
+    const selectedMultiValueKeys = this.normalizeStringList(
+      body?.selected_multi_value_keys
+    );
     const selectedTagKeys = Array.isArray(body?.selected_tag_keys)
       ? body.selected_tag_keys
           .map((value) => String(value || ""))
@@ -512,7 +530,8 @@ export class MergeService {
       safeEntities,
       customFields,
       fieldSources,
-      selectedTagKeys
+      selectedTagKeys,
+      selectedMultiValueKeys
     );
 
     if (Object.keys(patch).length) {
@@ -601,6 +620,7 @@ export class MergeService {
         entityType,
         entityIds,
         fieldSources,
+        selectedMultiValueKeys,
         selectedTagKeys,
         selectedLinkedLeadIds,
         deletedEntityIds,
@@ -789,6 +809,7 @@ export class MergeService {
     selectedContactIds: number[],
     fieldSources: Record<string, number>,
     selectedTagKeys: string[],
+    selectedMultiValueKeys: string[],
     reason: string,
     profile: PublicProfilePayload,
     warnings: string[]
@@ -826,7 +847,8 @@ export class MergeService {
             safeContacts,
             customFields,
             fieldSources,
-            selectedTagKeys
+            selectedTagKeys,
+            selectedMultiValueKeys
           )
         : this.buildContactPatch(survivor, duplicateContacts);
     if (Object.keys(patch).length) {
@@ -894,13 +916,22 @@ export class MergeService {
     entities: any[],
     customFields: Map<number, any>,
     fieldSources: Record<string, number>,
-    selectedTagKeys: string[]
+    selectedTagKeys: string[],
+    selectedMultiValueKeys: string[] = []
   ) {
     const byId = new Map<number, any>(
       entities.map((entity) => [Number(entity.id), entity])
     );
     const patch: any = {};
     const customFieldsPatch: any[] = [];
+    const selectedMultiValues = this.buildSelectedMultiCustomFields(
+      entities,
+      selectedMultiValueKeys
+    );
+    const handledMultiFieldIds = new Set<number>(
+      selectedMultiValues.map((field) => Number(field.field_id))
+    );
+    customFieldsPatch.push(...selectedMultiValues);
 
     Object.entries(fieldSources || {}).forEach(([key, sourceEntityId]) => {
       const source = byId.get(Number(sourceEntityId));
@@ -968,6 +999,7 @@ export class MergeService {
       }
       if (key.startsWith("cf_")) {
         const fieldId = Number(key.replace(/^cf_/, ""));
+        if (handledMultiFieldIds.has(fieldId)) return;
         const sourceField = this.findCustomField(source, fieldId);
         if (!sourceField) return;
         customFieldsPatch.push({
@@ -2071,6 +2103,20 @@ export class MergeService {
       })
       .forEach((fieldId) => {
         const schema = customFields.get(fieldId);
+        if (
+          entityType === "contacts" &&
+          this.isContactMultiValueField(entities, fieldId, schema)
+        ) {
+          rows.push(
+            this.toEntityMultiValueFieldRow(
+              entities,
+              `cf_${fieldId}`,
+              schema?.name || `Поле #${fieldId}`,
+              fieldId
+            )
+          );
+          return;
+        }
         rows.push(
           this.toEntityFieldRow(
             entities,
@@ -2089,6 +2135,34 @@ export class MergeService {
       });
 
     return rows.filter((row) => row.values.some((value) => value.hasValue));
+  }
+
+  private toEntityMultiValueFieldRow(
+    entities: any[],
+    key: string,
+    label: string,
+    customFieldId: number
+  ): EntityFieldRow {
+    const values = entities.map((entity) => {
+      const sourceField = this.findCustomField(entity, customFieldId);
+      const items = this.buildSelectableCustomValueItems(entity, sourceField);
+      return {
+        entityId: Number(entity.id),
+        hasValue: items.length > 0,
+        display: items.map((item) => item.display).join(", "),
+        items,
+      };
+    });
+
+    return {
+      key,
+      label,
+      type: "custom",
+      mode: "multiple",
+      customFieldId,
+      defaultEntityId: null,
+      values,
+    };
   }
 
   private toEntityFieldRow(
@@ -2585,6 +2659,23 @@ export class MergeService {
     );
   }
 
+  private normalizeStringList(value: unknown) {
+    const values = Array.isArray(value)
+      ? value
+      : typeof value === "string" && value.includes(",")
+      ? value.split(",")
+      : value === null || value === undefined || value === ""
+      ? []
+      : [value];
+    return Array.from(
+      new Set(
+        values
+          .map((item) => String(item || "").trim())
+          .filter((item) => item.length > 0)
+      )
+    );
+  }
+
   private normalizeEntityIds(
     value: unknown,
     message: string,
@@ -2683,6 +2774,108 @@ export class MergeService {
     return (lead?.custom_fields_values || []).find(
       (field) => Number(field?.field_id) === Number(fieldId)
     );
+  }
+
+  private isContactMultiValueField(
+    entities: any[],
+    fieldId: number,
+    schema?: any
+  ) {
+    const schemaCode = String(
+      schema?.code || schema?.field_code || schema?.type || ""
+    ).toUpperCase();
+    if (schemaCode === "PHONE" || schemaCode === "EMAIL") return true;
+
+    return entities.some((entity) => {
+      const field = this.findCustomField(entity, fieldId);
+      const code = String(field?.field_code || field?.code || "").toUpperCase();
+      return code === "PHONE" || code === "EMAIL";
+    });
+  }
+
+  private buildSelectableCustomValueItems(entity: any, field: any) {
+    const entityId = Number(entity?.id);
+    const fieldId = Number(field?.field_id);
+    const values = Array.isArray(field?.values) ? field.values : [];
+    if (!Number.isFinite(entityId) || !Number.isFinite(fieldId)) return [];
+
+    return values
+      .map((value, index) => {
+        const mapped = this.mapCustomFieldValues([value])[0];
+        if (!mapped) return null;
+        const display = this.formatCustomValueDisplay(value);
+        if (!display) return null;
+        return {
+          key: this.buildCustomValueKey(entityId, fieldId, index, mapped),
+          entityId,
+          display,
+        };
+      })
+      .filter(Boolean);
+  }
+
+  private buildSelectedMultiCustomFields(
+    entities: any[],
+    selectedKeys: string[]
+  ) {
+    const selected = new Set(selectedKeys || []);
+    if (!selected.size) return [];
+
+    const byField = new Map<number, any>();
+    const seenByField = new Map<number, Set<string>>();
+    entities.forEach((entity) => {
+      const entityId = Number(entity?.id);
+      (entity?.custom_fields_values || []).forEach((field) => {
+        const fieldId = Number(field?.field_id);
+        if (!Number.isFinite(entityId) || !Number.isFinite(fieldId)) return;
+        const values = Array.isArray(field?.values) ? field.values : [];
+        values.forEach((value, index) => {
+          const mapped = this.mapCustomFieldValues([value])[0];
+          if (!mapped) return;
+          const key = this.buildCustomValueKey(
+            entityId,
+            fieldId,
+            index,
+            mapped
+          );
+          if (!selected.has(key)) return;
+
+          if (!byField.has(fieldId)) {
+            byField.set(fieldId, {
+              field_id: fieldId,
+              field_code: field.field_code,
+              values: [],
+            });
+            seenByField.set(fieldId, new Set());
+          }
+          const stableValueKey = JSON.stringify(mapped);
+          const seen = seenByField.get(fieldId)!;
+          if (seen.has(stableValueKey)) return;
+          seen.add(stableValueKey);
+          byField.get(fieldId).values.push(mapped);
+        });
+      });
+    });
+
+    return Array.from(byField.values()).filter((field) => field.values.length);
+  }
+
+  private buildCustomValueKey(
+    entityId: number,
+    fieldId: number,
+    index: number,
+    value: any
+  ) {
+    const raw = Buffer.from(JSON.stringify(value)).toString("base64");
+    return `${entityId}:${fieldId}:${index}:${raw}`;
+  }
+
+  private formatCustomValueDisplay(value: any) {
+    const raw = value?.value;
+    if (raw === null || raw === undefined || raw === "") return "";
+    const text = typeof raw === "object" ? JSON.stringify(raw) : String(raw);
+    const enumText = String(value?.enum || value?.enum_code || "").trim();
+    return enumText ? `${text} · ${enumText}` : text;
   }
 
   private formatCustomField(field: any, schema?: any) {
